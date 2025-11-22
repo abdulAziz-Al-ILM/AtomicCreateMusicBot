@@ -18,7 +18,7 @@ from pydub import AudioSegment
 BOT_TOKEN = os.getenv("BOT_TOKEN", "SIZNING_BOT_TOKEN")
 PAYMENT_TOKEN = os.getenv("PAYMENT_TOKEN", "CLICK_TOKEN") 
 ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))
-
+STICKER_ID = "CAACAgIAAxkBAAIB2WkiBBE0NrYUX7Hlg5uWGQwuTgABcwACZYsAAngPEUk26XnQ7yiUBTYE" # YANGI QO'SHILDI
 DB_NAME = "music_bot.db"
 
 # --- XAVFSIZLIK ---
@@ -469,6 +469,7 @@ async def process_std(call: types.CallbackQuery, state: FSMContext):
     
     if result == "success":
         await bot.send_audio(call.from_user.id, FSInputFile(out), caption=f"🎹 Natija: {inst}")
+        await bot.send_document(call.from_user.id, STICKER_ID) 
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute("UPDATE users SET daily_usage = daily_usage + 1 WHERE telegram_id = ?", (call.from_user.id,))
             await db.commit()
