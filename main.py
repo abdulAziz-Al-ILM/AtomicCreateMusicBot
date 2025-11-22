@@ -431,7 +431,7 @@ async def admin_cast_send(message: types.Message, state: FSMContext):
 # --- AUDIO PROCESS HANDLERS ---
 @dp.message(F.text == "🎹 Musiqa yasash")
 async def music_req(message: types.Message, state: FSMContext):
-    await message.answer("Assalomu alaykum! \nQani, boshladik! 🎤 Ovozli xabar yoki audio yuboring.", reply_markup=main_kb())
+    await message.answer("Assalomu alaykum! \n   Qani, boshladik! Audio yuboring, men uni musiqa asboblarida chalib beraman. \n   Agar telegram orqali hozirni o'zida ovozli xabarni yubormoqchi bo'lsangiz [] @AtomicAudioConvertorBot [] botimiz orqali wav formatga o'girib oling  \n   Siz esa o'zingiz istagan musiqalarni yoza olasiz. \n   Plus 🌟  va  Pro 🚀 obunalari bilan yanada keng imkoniyatga ega bo'ling. \n\n\nFoydalanish qoidalari (ToU) bilan tanishing: https://t.me/Atomic_Online_Services/5", reply_markup=main_kb())
     await state.set_state(AudioState.wait_audio)
 
 @dp.message(AudioState.wait_audio, F.content_type.in_([ContentType.AUDIO, ContentType.VOICE]))
@@ -445,7 +445,7 @@ async def get_audio_std(message: types.Message, state: FSMContext):
 
     user = await check_user_limits(uid)
     if user[5] >= (LIMITS[user[3]]['daily'] + user[9]):
-        await message.answer("😔 Bugungi limit tugadi. Ertaga keling yoki obuna bo'ling!")
+        await message.answer("😔 Bugungi limit tugadi. Ertaga keling yoki obuna bo'ling! \nAytgancha, do'stingizni taklif qilsangiz ham qo'shimcha imkoniyatga ega bo'lasiz \nBepul rejimdan foydalansa sizga +2 ta \n🌟 Plus rejimdan foydalansa sizga +8 ta \n🚀 Pro rejimdan foydalansa +16 ta \n\nReferalingizni olish uchun 'Statistika' tugmasini bosing")
         await state.clear()
         return
 
@@ -583,7 +583,7 @@ async def ads_handler(message: types.Message):
 
 @dp.message(F.text == "ℹ️ Yordam")
 async def help_msg(message: types.Message):
-    await message.answer("Botdan foydalanish bo'yicha yordam...")
+    await message.answer("Yordam kerakmi? Botdan foydalanish juda oson 😊 \n1. 'Musiqa yasash'ni bosing \n2. Audio yuboring \n3. Musiqa asbobini tanlang \n biroz kutsangiz musiqangizni olasiz \n\nReferal havola orqali do'stlaringizni chaqirsangiz ko'proq imkoniyat olasiz! 😉 \n\n\nPlus va Pro obunasi bilan yanada keng imkoniyat: \n🆓 Bepul bilan kuniga 8 ta 20 soniyadan ko'p bo'lmagan auidolarni 8 xil musiqa asbobida yarating \n🌟 Plus bilan atigi 24 000 uzs (yigirma to'rt ming o'zbek so'mi) evaziga 24 ta 120 soniyagacha bo'lgan audiolarni 12 xil musiqa asbobida havaskor musiqachilardek yarating \n🚀 Pro bilan atigi 50 000 uzs (ellik ming o'zbek so'mi) evaziga 50 ta 10 daqiqagacha bo'lgan audiolarni 24 xil musiqa asbobida professionallardek yarating \n\nMashhur qo'shiqchi bo'lib ketsangiz bizni eslab qo'ysangiz kifoya 😇")
 
 async def main():
     await init_db()
