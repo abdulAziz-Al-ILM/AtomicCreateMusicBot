@@ -344,15 +344,20 @@ async def start(message: types.Message, command: CommandObject):
 @dp.message(F.text == "📊 Statistika")
 async def stats(message: types.Message):
     user = await check_user_limits(message.from_user.id)
+    
+    # Agar foydalanuvchi topilmasa, ro'yxatdan o'tishni ta'minlaymiz
+    if not user:
+        await register_user(message.from_user.id, message.from_user.username)
+        user = await check_user_limits(message.from_user.id)
+    
     disc = await get_discount()
     disc_txt = f"\n🔥 **{disc}% CHEGIRMA ketmoqda!**" if disc > 0 else ""
     
-    # Xatoni oldini olish uchun tashqarida hisoblash
     obuna_status = user[4] if user[4] else "Yo'q"
     
     text = (f"👤 **Profil:**\n🏷 Status: **{user[3].upper()}**\n🔋 Limit: {user[5]}/{LIMITS[user[3]]['daily'] + user[9]}\n⏳ Obuna: {obuna_status}\n{disc_txt}\n\n🔗 Referal: `https://t.me/{(await bot.get_me()).username}?start={message.from_user.id}`")
     await message.answer(text, parse_mode="Markdown")
-
+    
 @dp.message(F.text.in_({"🌟 Plus Obuna", "🚀 Pro Obuna"}))
 async def subscribe(message: types.Message):
     is_plus = "Plus" in message.text
@@ -431,50 +436,82 @@ async def admin_cast_send(message: types.Message, state: FSMContext):
 # --- AUDIO PROCESS HANDLERS ---
 @dp.message(F.text == "🎹 Musiqa yasash")
 async def music_req(message: types.Message, state: FSMContext):
-    await message.answer("Assalomu alaykum! \n   Qani, boshladik! Audio yuboring, men uni musiqa asboblarida chalib beraman. \n   Agar telegram orqali hozirni o'zida ovozli xabarni yubormoqchi bo'lsangiz [] @AtomicAudioConvertorBot [] botimiz orqali wav formatga o'girib oling  \n   Siz esa o'zingiz istagan musiqalarni yoza olasiz. \n   Plus 🌟  va  Pro 🚀 obunalari bilan yanada keng imkoniyatga ega bo'ling. \n\n\nFoydalanish qoidalari (ToU) bilan tanishing: https://t.me/Atomic_Online_Services/5", reply_markup=main_kb())
+    await message.answer("Assalomu alaykum! \n   Qani, boshladik! Audio yuboring, men uni musiqa asboblarida chalib beraman. \n   Agar telegram orqali hozirni o'zida ovozli xabarni yubormoqchi bo'lsangiz yoki videodagi ovozni olmoqchi bo'lsangiz [] @AtomicAudioConvertorBot [] botimiz orqali wav formatga o'girib oling  \n\n   Plus 🌟  va  Pro 🚀 obunalari bilan yanada keng imkoniyatga ega bo'ling. \n\n\nFoydalanish qoidalari (ToU) bilan tanishing: https://t.me/Atomic_Online_Services/5", reply_markup=main_kb())
     await state.set_state(AudioState.wait_audio)
 
 @dp.message(AudioState.wait_audio, F.content_type.in_([ContentType.AUDIO, ContentType.VOICE]))
 async def get_audio_std(message: types.Message, state: FSMContext):
     uid = message.from_user.id
     now = time.time()
+    
+    # ... (THROTTLE CHECK) ...
     if uid in THROTTLE_CACHE and (now - THROTTLE_CACHE[uid]) < THROTTLE_LIMIT:
         wait = int(THROTTLE_LIMIT - (now - THROTTLE_CACHE[uid]))
         return await message.answer(f"✋ Shoshmang do'stim, yana {wait} soniya kuting.")
     THROTTLE_CACHE[uid] = now
 
+    # ... (LIMIT CHECK) ...
     user = await check_user_limits(uid)
     if user[5] >= (LIMITS[user[3]]['daily'] + user[9]):
         await message.answer("😔 Bugungi limit tugadi. Ertaga keling yoki obuna bo'ling! \nAytgancha, do'stingizni taklif qilsangiz ham qo'shimcha imkoniyatga ega bo'lasiz \nBepul rejimdan foydalansa sizga +2 ta \n🌟 Plus rejimdan foydalansa sizga +8 ta \n🚀 Pro rejimdan foydalansa +16 ta \n\nReferalingizni olish uchun 'Statistika' tugmasini bosing")
         await state.clear()
         return
 
-    file_id = message.voice.file_id if message.voice else message.audio.file_id
-    path = f"downloads/{file_id}.ogg"
-    await bot.download(file_id, destination=path)
-    await state.update_data(path=path)
-    await message.answer("Qaysi asbobda chalib beray?", reply_markup=instr_kb(user[3]))
-    await state.set_state(AudioState.wait_instr)
 
+    # --- FAYL QAYTA ISHLASH (Universal formatga o'tkazish) ---
+    temp_dir = "downloads"
+    file_id = message.voice.file_id if message.voice else message.audio.file_id
+    
+    # Yuklash uchun vaqtinchalik fayl nomi. Kengaytmasiz saqlash xavfsizroq.
+    path_in = os.path.join(temp_dir, f"{file_id}_in") 
+    path_out = os.path.join(temp_dir, f"{file_id}.mp3") # Natija MP3 bo'ladi
+    
+    try:
+        # 1. Faylni yuklab olish (Telegramning o'z formatida)
+        await bot.download(file_id, destination=path_in)
+        
+        # 2. Fayl o'qish va limitni tekshirish
+        audio = AudioSegment.from_file(path_in)
+        
+        limit_duration = LIMITS[user[3]]['duration'] * 1000
+        if len(audio) > limit_duration:
+             os.remove(path_in)
+             await state.clear()
+             # Vaqtni soniyada chiqarish uchun
+             limit_sec = int(limit_duration / 1000)
+             return await message.answer(f"⚠️ Limit: Maksimal audio uzunligi {limit_sec} soniya.")
+
+        # 3. Keyingi bosqich uchun ma'lumotlarni saqlash
+        await state.update_data(path_in=path_in, path_out=path_out)
+        await message.answer("Qaysi asbobda chalib beray?", reply_markup=instr_kb(user[3]))
+        await state.set_state(AudioState.wait_instr)
+
+    except Exception as e:
+        logging.error(f"Audio yuklab olishda/o'qishda xato: {e}")
+        await message.answer("❌ Audio faylni qabul qilishda texnik xatolik yuz berdi. Iltimos, yana urinib ko'ring.")
+        try: os.remove(path_in); os.remove(path_out)
+        except: pass
+        await state.clear()
+        return
+
+# Va uning natija handlerini ham to'g'irlash kerak
 @dp.callback_query(AudioState.wait_instr, F.data.startswith("i_"))
 async def process_std(call: types.CallbackQuery, state: FSMContext):
     inst = call.data.split("_")[1]
     data = await state.get_data()
-    path = data['path']
-    out = path.replace(".ogg", ".mp3")
+    path_in = data['path_in'] # YANGI
+    path_out = data['path_out'] # YANGI
     
     await call.message.edit_text(f"🎧 **{inst}** sozlanmoqda... (ΛTOMIC • Composer)")
     
-    result = await asyncio.to_thread(audio_engine.process, path, inst, out)
+    # Processni ishga tushiramiz (path_in va path_out o'zgartirildi)
+    result = await asyncio.to_thread(audio_engine.process, path_in, inst, path_out)
     
     if result == "success":
-        await bot.send_audio(call.from_user.id, FSInputFile(out), caption=f"🎹 Natija: {inst}")
-        await bot.send_document(call.from_user.id, STICKER_ID) 
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("UPDATE users SET daily_usage = daily_usage + 1 WHERE telegram_id = ?", (call.from_user.id,))
-            await db.commit()
+        await bot.send_audio(call.from_user.id, FSInputFile(path_out), caption=f"🎹 Natija: {inst}")
+        # ... (Limit update) ...
         await give_referral_bonus(call.from_user.id, 'usage')
-        try: os.remove(out)
+        try: os.remove(path_out)
         except: pass
     elif result == "missing_files":
         await call.message.edit_text(f"🛠 **Ushbu asbob ({inst}) fayllari serverga yuklanmoqda.**\nTez orada ishga tushadi!")
