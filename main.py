@@ -311,7 +311,7 @@ async def stats(message: types.Message):
     user = await check_user_limits(message.from_user.id)
     disc = await get_discount()
     disc_txt = f"\n🔥 **{disc}% CHEGIRMA ketmoqda!**" if disc > 0 else ""
-    text = (f"👤 **Profil:** \n🏷 Status: **{user[3].upper()}**\n🔋 Limit: {user[5]}/{LIMITS[user[3]]['daily'] + user[9]}\n⏳ Obuna: {user[4] if user[4] else 'Yo'q'}\n{disc_txt}\n\n🔗 Referal: `https://t.me/{(await bot.get_me()).username}?start={message.from_user.id}`")
+  text = (f"👤 **Profil:**\n🏷 Status: **{user[3].upper()}**\n🔋 Limit: {user[5]}/{LIMITS[user[3]]['daily'] + user[9]}\n⏳ Obuna: {user[4] if user[4] else \"Yo'q\"}\n{disc_txt}\n\n🔗 Referal: `https://t.me/{(await bot.get_me()).username}?start={message.from_user.id}`")
     await message.answer(text, parse_mode="Markdown")
 
 @dp.message(F.text.in_({"🌟 Plus Obuna", "🚀 Pro Obuna"}))
