@@ -53,6 +53,19 @@ NOTE_MAPPING = [
     'C4', 'C#4', 'D4', 'D#4', 'E4', 'F4', 'F#4', 'G4', 'G#4', 'A4', 'A#4', 'B4'
 ] 
 
+# --- ASBOB XARAKTERISTIKALARI (24 ta asbobning barchasini qamrab oladi) ---
+INSTRUMENT_CHARACTERISTICS = {
+    # Uzoq, silliq, birikuvchi (Legato) tovushlar. Eng yuqori sustain.
+    'SUSTAINED': ["Violin", "Cello", "Flute", "Synth", "Pad", "Strings", "Choir", "Oboe", "Clarinet", "Accordion"],
+    
+    # Perkussiv, tortiladigan, tez so'nuvchi (Pluck/Keys) tovushlar. O'rta sustain.
+    'PERCUSSIVE': ["Piano", "Guitar", "Harp", "Trumpet", "Saxophone", "Koto", "Sitar", "Banjo", "ElectricGuitar"],
+    
+    # Zarbli, juda qisqa, baland ta'sirli tovushlar. Eng qisqa sustain.
+    'DRUM_LIKE': ["Drum", "PhonkCowbell", "808", "PhonkBass"]
+}
+# ---
+
 # --- AUDIO ENGINE (UPDATED: PROFESSIONAL RHYTHM) ---
 class AudioEngine:
     def __init__(self):
@@ -65,92 +78,64 @@ class AudioEngine:
         return os.path.exists(test_path)
 
     def generate_track(self, original_audio, instrument_name):
-        # 1. Ritmik vaqtlar ro'yxati (Millisekundlarda)
-        # Qisqa, O'rta, Uzun notalar
-        DURATIONS = [200, 400, 600, 800] 
+        # ... (Nota tanlash va sustain_duration hisoblash qismi o'zgarishsiz qoladi) ...
         
-        # Tezkor asboblar uchun qisqaroq vaqtlar
-        if instrument_name in ["PhonkCowbell", "808", "Drum", "ElectricGuitar"]:
-            DURATIONS = [150, 300, 450]
-
-        avg_loudness = original_audio.rms or 1
-        generated = AudioSegment.silent(duration=0)
-        
-        # 2. Original audioni analiz qilish (Loop)
-        cursor = 0
-        total_len = len(original_audio)
-        
-        steps = len(NOTE_MAPPING)
-        ratio_step = 3.5 / steps 
-
         while cursor < total_len:
-            # Tasodifiy uzunlikni tanlaymiz (Ritmik o'zgaruvchanlik)
-            current_duration = random.choice(DURATIONS)
+            # ... (sustained duration hisoblash) ...
             
-            # Audiodan shu bo'lakni kesib olamiz
-            chunk = original_audio[cursor : cursor + current_duration]
-            
-            # Agar fayl oxiriga yetgan bo'lsa
-            if len(chunk) == 0: break
-            
-            # Bo'lakning o'rtacha ovoz balandligi
-            curr_vol = chunk.rms 
-            
-            # Dinamik pauza (Silence threshold)
-            threshold = 0.6
-            if instrument_name in ["Drum", "PhonkCowbell"]: threshold = 1.2
-            elif instrument_name in ["Bass", "808"]: threshold = 0.9
-            
-            # Agar ovoz juda past bo'lsa, nota chalmaymiz (Pauza)
-            if curr_vol < avg_loudness * threshold:
-                generated += AudioSegment.silent(duration=len(chunk))
-                cursor += len(chunk)
-                continue
-
-            # Nota tanlash (Ovoz balandligiga qarab)
-            ratio = curr_vol / avg_loudness
-            index = min(int(ratio / ratio_step), steps - 1)
-            if ratio >= 3.5: index = steps - 1
-            
-            note_suffix = NOTE_MAPPING[index]
-            sample_file = f"{instrument_name}_{note_suffix}.wav"
-            sample_path = os.path.join(self.base_path, sample_file)
-
-            if not os.path.exists(sample_path):
-                 generated += AudioSegment.silent(duration=len(chunk))
-                 cursor += len(chunk)
-                 continue
+            # --- 3. Notalarni Generatsiya Qilish ---
+            # ... (Fayl tanlash va kesish qismi o'zgarishsiz qoladi) ...
             
             base_sample = AudioSegment.from_file(sample_path)
+            note = base_sample[:sustain_duration]
+            if len(note) < sustain_duration:
+                note += AudioSegment.silent(duration=sustain_duration - len(note))
             
-            # 3. Professional ADSR (Attack, Decay, Sustain, Release)
-            # Tanlangan vaqtga (current_duration) moslab notani kesamiz
+            # 🎹🎹🎹 PROFESSIONAL ADSR ENVELOPE (MAKSIMAL DETALLASHGAN QISM) 🎹🎹🎹
             
-            note = base_sample[:current_duration]
-            
-            # Agar asl sempl qisqa bo'lsa, jimlik qo'shamiz (Loop qilinmaydi, tabiiyroq)
-            if len(note) < current_duration:
-                note += AudioSegment.silent(duration=current_duration - len(note))
-            
-            # Yumshatish (Fade In/Out) - "Chertish" ovozini yo'qotish uchun
-            if instrument_name in ["Violin", "Cello", "Flute", "Synth", "Pad", "Strings", "Choir"]:
-                # Legato (Silliq o'tish)
-                note = note.fade_in(30).fade_out(50)
-            elif instrument_name in ["Drum", "PhonkCowbell", "808"]:
-                # Zarbli asboblar (Keskin boshlanish, tez so'nish)
-                note = note.fade_out(10)
-            else:
-                # Piano, Guitar (Standart)
-                note = note.fade_out(30)
+            crossfade_len = 0 # Asosan 0, faqat Silliq asboblar uchun o'zgaradi
 
-            # 4. Yig'ish
-            # Ba'zi asboblar uchun Crossfade (bir-biriga kirishib ketish) qilamiz
-            if len(generated) > 50 and instrument_name in ["Violin", "Strings", "Pad"]:
-                generated = generated.append(note, crossfade=50)
+            if instrument_name in INSTRUMENT_CHARACTERISTICS['SUSTAINED']:
+                # 1. Silliq/Legato asboblar (Violin, Synth, Choir, Oboe, Cello...)
+                # Yumshoq Boshlanish (Attack) va Tugash (Release) - 
+                # tovushlar bir-biriga silliq ulanishi shart.
+                note = note.fade_in(50).fade_out(80) 
+                crossfade_len = 80 # Oldingi notaga qo'shib yuborish (Silliq o'tish)
+                
+            elif instrument_name in ["Piano", "Harp", "Koto"]:
+                # 2. Asosiy Klavishli asboblar (Piano, Arfa)
+                # O'rta keskinlik, tovushning tabiiy so'nishi (Decay/Release) uzoqroq.
+                note = note.fade_out(70) 
+                crossfade_len = 0
+            
+            elif instrument_name in ["Guitar", "ElectricGuitar", "Banjo"]:
+                # 3. Torli asboblar (Pluck/Zarb)
+                # Tezroq so'nish (Decay) va yuqori keskinlik.
+                note = note.fade_out(35)
+                crossfade_len = 0
+            
+            elif instrument_name in ["Trumpet", "Saxophone", "Clarinet"]:
+                # 4. Puflama asboblar (Wind)
+                # Boshlanishida biroz yumshoqlik, o'rta so'nish.
+                note = note.fade_in(10).fade_out(50)
+                crossfade_len = 0
+                
+            elif instrument_name in INSTRUMENT_CHARACTERISTICS['DRUM_LIKE']:
+                # 5. Zarbli/Bass (Drum, 808, Phonk...)
+                # Eng tez so'nish (Punchy), minimal Release.
+                note = note.fade_out(10)
+                crossfade_len = 0
+            
+            # 🟢 Yig'ish (Crossfade ni dinamik ishlatish) 🟢
+            if crossfade_len > 0 and len(generated) > 50:
+                # Faqat Legato asboblar uchun Crossfade ishlatiladi
+                generated = generated.append(note, crossfade=crossfade_len)
             else:
+                # Qolgan asboblar uchun oddiy qo'shish (Discrete attack)
                 generated += note
             
-            cursor += len(chunk) # Keyingi bo'lakka o'tish
+            # Kursorni cho'zilgan vaqtga siljitamiz
+            cursor += sustain_duration 
         
         return generated
 
@@ -266,6 +251,25 @@ async def check_user_limits(telegram_id):
             updated = True
     return await get_user(telegram_id) if updated else user
 
+import aiosqlite
+# ... (boshqa importlar) ...
+
+DB_NAME = "sizning_db_nomingiz.db"  # O'zingizning DB nomingizga almashtiring
+
+async def update_daily_usage(telegram_id):
+    """Foydalanuvchining kunlik ishlatish sonini 1 ga oshiradi."""
+    
+    # 💥 aiosqlite yordamida ulanish ochish
+    async with aiosqlite.connect(DB_NAME) as db: 
+        await db.execute("""
+            UPDATE users
+            SET daily_usage = daily_usage + 1
+            WHERE telegram_id = ?
+        """, (telegram_id,))
+        
+        # 🔴 MUHIM: O'zgarishlarni saqlash
+        await db.commit()
+        
 async def give_referral_bonus(user_id, action):
     user = await get_user(user_id)
     if not user or not user[7]: return
@@ -355,7 +359,7 @@ async def stats(message: types.Message):
     
     obuna_status = user[4] if user[4] else "Yo'q"
     
-    text = (f"👤 **Profil:**\n🏷 Status: **{user[3].upper()}**\n🔋 Limit: {user[5]}/{LIMITS[user[3]]['daily'] + user[9]}\n⏳ Obuna: {obuna_status}\n{disc_txt}\n\n🔗 Referal: `https://t.me/{(await bot.get_me()).username}?start={message.from_user.id}`")
+    text = (f"👤 **Profil:**\n🏷 Status: **{user[3].upper()}**\n🔋 Limit: {user[5]}/{LIMITS[user[3]]['daily'] + user[9]}\n⏳ Obuna tugaydi: {obuna_status}\n{disc_txt}\n\n🔗 Referal: `https://t.me/{(await bot.get_me()).username}?start={message.from_user.id}`")
     await message.answer(text, parse_mode="Markdown")
     
 @dp.message(F.text.in_({"🌟 Plus Obuna", "🚀 Pro Obuna"}))
@@ -508,19 +512,22 @@ async def process_std(call: types.CallbackQuery, state: FSMContext):
     result = await asyncio.to_thread(audio_engine.process, path_in, inst, path_out)
     
     if result == "success":
-        await bot.send_audio(call.from_user.id, FSInputFile(path_out), caption=f"🎹 Natija: {inst}")
-        # ... (Limit update) ...
-        await give_referral_bonus(call.from_user.id, 'usage')
-        try: os.remove(path_out)
-        except: pass
-    elif result == "missing_files":
-        await call.message.edit_text(f"🛠 **Ushbu asbob ({inst}) fayllari serverga yuklanmoqda.**\nTez orada ishga tushadi!")
-    else:
-        await call.message.edit_text("❌ Texnik xatolik yuz berdi.")
+    await bot.send_audio(call.from_user.id, FSInputFile(path_out), caption=f"🎹 Natija: {inst}")
     
-    try: os.remove(path)
+    # 🟢 BU YERGA QO'SHILADI: Ishlatish sonini yangilash
+    await update_daily_usage(call.from_user.id) 
+    
+    await give_referral_bonus(call.from_user.id, 'usage')
+    try: os.remove(path_out)
     except: pass
-    await state.clear()
+elif result == "missing_files":
+    await call.message.edit_text(f"🛠 **Ushbu asbob ({inst}) fayllari serverga yuklanmoqda.**\nTez orada ishga tushadi!")
+else:
+    await call.message.edit_text("❌ Texnik xatolik yuz berdi.")
+ 
+try: os.remove(path)
+except: pass
+await state.clear()
 
 @dp.callback_query(AudioState.wait_instr, F.data == "locked_info")
 async def locked_info(call: types.CallbackQuery):
