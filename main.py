@@ -512,22 +512,22 @@ async def process_std(call: types.CallbackQuery, state: FSMContext):
     result = await asyncio.to_thread(audio_engine.process, path_in, inst, path_out)
     
     if result == "success":
-    await bot.send_audio(call.from_user.id, FSInputFile(path_out), caption=f"🎹 Natija: {inst}")
+        await bot.send_audio(call.from_user.id, FSInputFile(path_out), caption=f"🎹 Natija: {inst}")
     
-    # 🟢 BU YERGA QO'SHILADI: Ishlatish sonini yangilash
-    await update_daily_usage(call.from_user.id) 
+        # 🟢 BU YERGA QO'SHILADI: Ishlatish sonini yangilash
+        await update_daily_usage(call.from_user.id) 
     
-    await give_referral_bonus(call.from_user.id, 'usage')
-    try: os.remove(path_out)
-    except: pass
-elif result == "missing_files":
-    await call.message.edit_text(f"🛠 **Ushbu asbob ({inst}) fayllari serverga yuklanmoqda.**\nTez orada ishga tushadi!")
-else:
-    await call.message.edit_text("❌ Texnik xatolik yuz berdi.")
+        await give_referral_bonus(call.from_user.id, 'usage')
+        try: os.remove(path_out)
+        except: pass
+    elif result == "missing_files":
+        await call.message.edit_text(f"🛠 **Ushbu asbob ({inst}) fayllari serverga yuklanmoqda.**\nTez orada ishga tushadi!")
+    else:
+        await call.message.edit_text("❌ Texnik xatolik yuz berdi.")
  
-try: os.remove(path)
-except: pass
-await state.clear()
+    try: os.remove(path)
+    except: pass
+    await state.clear()
 
 @dp.callback_query(AudioState.wait_instr, F.data == "locked_info")
 async def locked_info(call: types.CallbackQuery):
