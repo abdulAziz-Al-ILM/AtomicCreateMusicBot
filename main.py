@@ -3,10 +3,10 @@ import os
 import sys
 import asyncio
 import time
-import random  # <--- YANGI: Ritm uchun
+import random
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import Command, CommandStart, CommandObject
+from aiogram.filters import Command, CommandStart, CommandObject, BaseFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import LabeledPrice, PreCheckoutQuery, ContentType, FSInputFile
@@ -14,16 +14,22 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 import aiosqlite
 from pydub import AudioSegment
 
-# --- SOZLAMALAR (Railway Variables) ---
+# --- SOZLAMALAR ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "SIZNING_BOT_TOKEN")
 PAYMENT_TOKEN = os.getenv("PAYMENT_TOKEN", "CLICK_TOKEN") 
 ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))
-STICKER_ID = "CAACAgIAAxkBAAIB2WkiBBE0NrYUX7Hlg5uWGQwuTgABcwACZYsAAngPEUk26XnQ7yiUBTYE" # YANGI QO'SHILDI
+STICKER_ID = "CAACAgIAAxkBAAIB2WkiBBE0NrYUX7Hlg5uWGQwuTgABcwACZYsAAngPEUk26XnQ7yiUBTYE"
 DB_NAME = "music_bot.db"
 
-# --- XAVFSIZLIK ---
+# --- XAVFSIZLIK (GUARDIAN SYSTEM) ---
 THROTTLE_CACHE = {} 
 THROTTLE_LIMIT = 15 
+
+# Anti-Flood Sozlamalari
+FLOOD_LIMIT = 7  # 2 soniya ichida 7 ta xabar = Hujum
+FLOOD_WINDOW = 2 # soniya
+BANNED_CACHE = set() # Bloklanganlar ro'yxati
+USER_ACTIVITY = {}   # Faollik tarixi
 
 # --- LIMITLAR ---
 LIMITS = {
@@ -37,36 +43,78 @@ BASE_PRICE_PLUS = 24000 * 100
 BASE_PRICE_PRO = 50000 * 100
 PRICE_STUDIO = 30000 * 100
 
-# --- ASBOBLAR VA NOTALAR ---
+# --- ASBOBLAR RO'YXATI ---
 INSTRUMENTS_LIST = [
-    # -- FREE --
     "Piano", "Guitar", "Drum", "Flute", "Bass", "Trumpet", "Violin", "Saxophone",
-    # -- PLUS --
     "Cello", "Harp", "Clarinet", "Oboe",
-    # -- PRO --
     "Synth", "808", "PhonkBass", "PhonkCowbell", "ElectricGuitar", "Koto", "Sitar", "Banjo",
     "Accordion", "Choir", "Strings", "Pad"
 ]
+
+# --- ASBOB XARAKTERISTIKALARI ---
+INSTRUMENT_CHARACTERISTICS = {
+    'SUSTAINED': ["Violin", "Cello", "Flute", "Synth", "Pad", "Strings", "Choir", "Oboe", "Clarinet", "Accordion"],
+    'PERCUSSIVE': ["Piano", "Guitar", "Harp", "Trumpet", "Saxophone", "Koto", "Sitar", "Banjo", "ElectricGuitar"],
+    'DRUM_LIKE': ["Drum", "PhonkCowbell", "808", "PhonkBass"]
+}
 
 NOTE_MAPPING = [
     'C3', 'C#3', 'D3', 'D#3', 'E3', 'F3', 'F#3', 'G3', 'G#3', 'A3', 'A#3', 'B3', 
     'C4', 'C#4', 'D4', 'D#4', 'E4', 'F4', 'F#4', 'G4', 'G#4', 'A4', 'A#4', 'B4'
 ] 
 
-# --- ASBOB XARAKTERISTIKALARI (24 ta asbobning barchasini qamrab oladi) ---
-INSTRUMENT_CHARACTERISTICS = {
-    # Uzoq, silliq, birikuvchi (Legato) tovushlar. Eng yuqori sustain.
-    'SUSTAINED': ["Violin", "Cello", "Flute", "Synth", "Pad", "Strings", "Choir", "Oboe", "Clarinet", "Accordion"],
-    
-    # Perkussiv, tortiladigan, tez so'nuvchi (Pluck/Keys) tovushlar. O'rta sustain.
-    'PERCUSSIVE': ["Piano", "Guitar", "Harp", "Trumpet", "Saxophone", "Koto", "Sitar", "Banjo", "ElectricGuitar"],
-    
-    # Zarbli, juda qisqa, baland ta'sirli tovushlar. Eng qisqa sustain.
-    'DRUM_LIKE': ["Drum", "PhonkCowbell", "808", "PhonkBass"]
-}
-# ---
+db_pool = None # SQLite da pool shart emas, lekin moslik uchun
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
-# --- AUDIO ENGINE (UPDATED: PROFESSIONAL RHYTHM) ---
+# --- 🛡️ GUARDIAN SECURITY SYSTEM (MIDDLEWARE) ---
+
+class SecurityMiddleware(BaseFilter):
+    async def __call__(self, message: types.Message) -> bool:
+        user_id = message.from_user.id
+        
+        # 1. Admin tekshirilmaydi
+        if user_id == ADMIN_ID:
+            return True
+
+        # 2. BANNED tekshiruvi
+        if user_id in BANNED_CACHE:
+            return False # Bloklangan, javob yo'q
+
+        # 3. FLOOD (DDOS) hujumini aniqlash
+        now = time.time()
+        user_history = USER_ACTIVITY.get(user_id, [])
+        
+        # Eskirgan yozuvlarni tozalash
+        user_history = [t for t in user_history if now - t < FLOOD_WINDOW]
+        user_history.append(now)
+        USER_ACTIVITY[user_id] = user_history
+        
+        if len(user_history) > FLOOD_LIMIT:
+            # 🚨 HUJUM ANIQLANDI!
+            await block_user_attack(user_id, message.from_user.first_name)
+            return False
+            
+        return True
+
+async def block_user_attack(user_id, name):
+    if user_id in BANNED_CACHE: return
+    
+    BANNED_CACHE.add(user_id)
+    
+    # Adminni ogohlantirish
+    alert_msg = (
+        f"🛡 **GUARDIAN TIZIMI: Hujum bartaraf etildi!**\n\n"
+        f"👤 Hujumchi: {name} (ID: `{user_id}`)\n"
+        f"⚔️ Turi: Flood/Spam Attack\n"
+        f"🚫 Status: **BLOKLANDI**"
+    )
+    try:
+        await bot.send_message(ADMIN_ID, alert_msg)
+        await bot.send_message(user_id, "⛔️ **Sizning harakatlaringiz xavfsizlik tizimi tomonidan bloklandi.**")
+    except: pass
+
+# --- AUDIO ENGINE (PRO) ---
 class AudioEngine:
     def __init__(self):
         self.base_path = "." 
@@ -78,63 +126,80 @@ class AudioEngine:
         return os.path.exists(test_path)
 
     def generate_track(self, original_audio, instrument_name):
-        # ... (Nota tanlash va sustain_duration hisoblash qismi o'zgarishsiz qoladi) ...
+        is_fast = instrument_name in ["PhonkCowbell", "808", "PhonkBass", "Drum", "ElectricGuitar"]
+        beat_duration = 200 if is_fast else 250
+
+        avg_loudness = original_audio.rms or 1
+        generated = AudioSegment.silent(duration=0)
+        
+        steps = len(NOTE_MAPPING)
+        ratio_step = 3.5 / steps 
+
+        cursor = 0
+        total_len = len(original_audio)
         
         while cursor < total_len:
-            # ... (sustained duration hisoblash) ...
+            chunk = original_audio[cursor : cursor + beat_duration]
+            if len(chunk) == 0: break
             
-            # --- 3. Notalarni Generatsiya Qilish ---
-            # ... (Fayl tanlash va kesish qismi o'zgarishsiz qoladi) ...
+            curr_vol = chunk.rms 
+            
+            threshold = 0.6
+            if instrument_name in ["Drum", "PhonkCowbell"]: threshold = 1.2
+            elif instrument_name in ["Bass", "808"]: threshold = 0.9
+            
+            if curr_vol < avg_loudness * threshold:
+                generated += AudioSegment.silent(duration=len(chunk))
+                cursor += len(chunk)
+                continue
+
+            ratio = curr_vol / avg_loudness
+            index = min(int(ratio / ratio_step), steps - 1)
+            note_suffix = NOTE_MAPPING[index]
+            
+            # SUSTAIN
+            sustain_duration = beat_duration
+            lookahead_cursor = cursor + beat_duration
+            
+            for _ in range(8):
+                next_chunk = original_audio[lookahead_cursor : lookahead_cursor + beat_duration]
+                if len(next_chunk) == 0: break
+                
+                if next_chunk.rms > avg_loudness * (threshold * 0.8):
+                    sustain_duration += len(next_chunk)
+                    lookahead_cursor += len(next_chunk)
+                else:
+                    break 
+
+            sample_file = f"{instrument_name}_{note_suffix}.wav"
+            sample_path = os.path.join(self.base_path, sample_file)
+
+            if not os.path.exists(sample_path):
+                 generated += AudioSegment.silent(duration=sustain_duration)
+                 cursor += sustain_duration
+                 continue
             
             base_sample = AudioSegment.from_file(sample_path)
+            
             note = base_sample[:sustain_duration]
             if len(note) < sustain_duration:
                 note += AudioSegment.silent(duration=sustain_duration - len(note))
             
-            # 🎹🎹🎹 PROFESSIONAL ADSR ENVELOPE (MAKSIMAL DETALLASHGAN QISM) 🎹🎹🎹
-            
-            crossfade_len = 0 # Asosan 0, faqat Silliq asboblar uchun o'zgaradi
-
+            # PROFESSIONAL ADSR
+            crossfade_len = 0
             if instrument_name in INSTRUMENT_CHARACTERISTICS['SUSTAINED']:
-                # 1. Silliq/Legato asboblar (Violin, Synth, Choir, Oboe, Cello...)
-                # Yumshoq Boshlanish (Attack) va Tugash (Release) - 
-                # tovushlar bir-biriga silliq ulanishi shart.
-                note = note.fade_in(50).fade_out(80) 
-                crossfade_len = 80 # Oldingi notaga qo'shib yuborish (Silliq o'tish)
-                
-            elif instrument_name in ["Piano", "Harp", "Koto"]:
-                # 2. Asosiy Klavishli asboblar (Piano, Arfa)
-                # O'rta keskinlik, tovushning tabiiy so'nishi (Decay/Release) uzoqroq.
-                note = note.fade_out(70) 
-                crossfade_len = 0
-            
-            elif instrument_name in ["Guitar", "ElectricGuitar", "Banjo"]:
-                # 3. Torli asboblar (Pluck/Zarb)
-                # Tezroq so'nish (Decay) va yuqori keskinlik.
-                note = note.fade_out(35)
-                crossfade_len = 0
-            
-            elif instrument_name in ["Trumpet", "Saxophone", "Clarinet"]:
-                # 4. Puflama asboblar (Wind)
-                # Boshlanishida biroz yumshoqlik, o'rta so'nish.
-                note = note.fade_in(10).fade_out(50)
-                crossfade_len = 0
-                
+                note = note.fade_in(50).fade_out(80)
+                crossfade_len = 80
             elif instrument_name in INSTRUMENT_CHARACTERISTICS['DRUM_LIKE']:
-                # 5. Zarbli/Bass (Drum, 808, Phonk...)
-                # Eng tez so'nish (Punchy), minimal Release.
                 note = note.fade_out(10)
-                crossfade_len = 0
-            
-            # 🟢 Yig'ish (Crossfade ni dinamik ishlatish) 🟢
-            if crossfade_len > 0 and len(generated) > 50:
-                # Faqat Legato asboblar uchun Crossfade ishlatiladi
+            else:
+                note = note.fade_out(40)
+
+            if crossfade_len > 0 and len(generated) > crossfade_len:
                 generated = generated.append(note, crossfade=crossfade_len)
             else:
-                # Qolgan asboblar uchun oddiy qo'shish (Discrete attack)
                 generated += note
             
-            # Kursorni cho'zilgan vaqtga siljitamiz
             cursor += sustain_duration 
         
         return generated
@@ -146,23 +211,16 @@ class AudioEngine:
 
             original = AudioSegment.from_file(input_path)
             track = self.generate_track(original, instrument_name)
-            
-            # Mastering (Ovozni normallashtirish va kuchaytirish)
             track = track.normalize() + 2 
-            
             track.export(output_path, format="mp3", bitrate="128k")
             return "success"
         except Exception as e:
-            logging.error(f"Xato: {e}")
+            logging.error(f"Audio Engine Xatosi: {e}", exc_info=True)
             return "error"
 
     def process_mix(self, input_path, instrument_list, output_path):
         try:
-            valid_instruments = []
-            for inst in instrument_list:
-                if self.check_files_exist(inst):
-                    valid_instruments.append(inst)
-            
+            valid_instruments = [inst for inst in instrument_list if self.check_files_exist(inst)]
             if not valid_instruments: return "missing_files"
 
             original = AudioSegment.from_file(input_path)
@@ -170,7 +228,7 @@ class AudioEngine:
             
             for inst in valid_instruments:
                 track = self.generate_track(original, inst)
-                track = track - 3 # Mixda shovqin bo'lmasligi uchun pasaytiramiz
+                track = track - 3 
                 if final_mix is None: final_mix = track
                 else: final_mix = final_mix.overlay(track)
             
@@ -179,12 +237,12 @@ class AudioEngine:
                 return "success"
             return "error"
         except Exception as e:
-            logging.error(f"Mix xato: {e}")
+            logging.error(f"Mix Engine Xatosi: {e}", exc_info=True)
             return "error"
 
 audio_engine = AudioEngine()
 
-# --- DATABASE (O'zgarishsiz) ---
+# --- DATABASE ---
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("""
@@ -199,6 +257,14 @@ async def init_db():
                 referrer_id INTEGER,
                 join_date TEXT,
                 bonus_limit INTEGER DEFAULT 0
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS payments (
+                id INTEGER PRIMARY KEY,
+                telegram_id INTEGER,
+                amount INTEGER,
+                date TEXT
             )
         """)
         await db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT UNIQUE, value TEXT)")
@@ -251,25 +317,17 @@ async def check_user_limits(telegram_id):
             updated = True
     return await get_user(telegram_id) if updated else user
 
-import aiosqlite
-# ... (boshqa importlar) ...
-
-DB_NAME = "sizning_db_nomingiz.db"  # O'zingizning DB nomingizga almashtiring
-
 async def update_daily_usage(telegram_id):
-    """Foydalanuvchining kunlik ishlatish sonini 1 ga oshiradi."""
-    
-    # 💥 aiosqlite yordamida ulanish ochish
-    async with aiosqlite.connect(DB_NAME) as db: 
-        await db.execute("""
-            UPDATE users
-            SET daily_usage = daily_usage + 1
-            WHERE telegram_id = ?
-        """, (telegram_id,))
-        
-        # 🔴 MUHIM: O'zgarishlarni saqlash
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("UPDATE users SET daily_usage = daily_usage + 1 WHERE telegram_id = ?", (telegram_id,))
         await db.commit()
-        
+
+async def get_total_revenue():
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT SUM(amount) FROM payments") as cursor:
+            result = await cursor.fetchone()
+            return (result[0] or 0) / 100
+
 async def give_referral_bonus(user_id, action):
     user = await get_user(user_id)
     if not user or not user[7]: return
@@ -284,9 +342,10 @@ async def give_referral_bonus(user_id, action):
         try: await bot.send_message(user[7], f"🎉 Do'stingiz faol! Sizga +{bonus} ta limit qo'shildi.")
         except: pass
 
-# --- BOT SETUP ---
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+# --- BOT HANDLERS ---
+
+# 🛡️ GUARDIAN FAOL
+dp.message.filter(SecurityMiddleware())
 
 # --- KEYBOARDS ---
 def main_kb():
@@ -312,7 +371,6 @@ def instr_kb(status):
     kb.adjust(3)
     return kb.as_markup()
 
-# 🟢 YANGI: ADMIN KEYBOARD
 def admin_kb():
     kb = ReplyKeyboardBuilder()
     kb.button(text="📈 Admin Stats")
@@ -332,7 +390,6 @@ class StudioState(StatesGroup):
     paying = State()
     waiting_audio = State()
 
-# 🟢 YANGI: ADMIN STATES
 class AdminState(StatesGroup):
     waiting_discount = State()
     waiting_broadcast = State()
@@ -348,20 +405,18 @@ async def start(message: types.Message, command: CommandObject):
 @dp.message(F.text == "📊 Statistika")
 async def stats(message: types.Message):
     user = await check_user_limits(message.from_user.id)
-    
-    # Agar foydalanuvchi topilmasa, ro'yxatdan o'tishni ta'minlaymiz
     if not user:
         await register_user(message.from_user.id, message.from_user.username)
         user = await check_user_limits(message.from_user.id)
-    
+
     disc = await get_discount()
     disc_txt = f"\n🔥 **{disc}% CHEGIRMA ketmoqda!**" if disc > 0 else ""
     
     obuna_status = user[4] if user[4] else "Yo'q"
     
-    text = (f"👤 **Profil:**\n🏷 Status: **{user[3].upper()}**\n🔋 Limit: {user[5]}/{LIMITS[user[3]]['daily'] + user[9]}\n⏳ Obuna tugaydi: {obuna_status}\n{disc_txt}\n\n🔗 Referal: `https://t.me/{(await bot.get_me()).username}?start={message.from_user.id}`")
+    text = (f"👤 **Profil:**\n🏷 Status: **{user[3].upper()}**\n🔋 Limit: {user[5]}/{LIMITS[user[3]]['daily'] + user[9]}\n⏳ Obuna: {obuna_status}\n{disc_txt}\n\n🔗 Referal: `https://t.me/{(await bot.get_me()).username}?start={message.from_user.id}`")
     await message.answer(text, parse_mode="Markdown")
-    
+
 @dp.message(F.text.in_({"🌟 Plus Obuna", "🚀 Pro Obuna"}))
 async def subscribe(message: types.Message):
     is_plus = "Plus" in message.text
@@ -373,7 +428,7 @@ async def subscribe(message: types.Message):
     desc = f"🎉 {disc}% Chegirma bilan!" if disc > 0 else "Bot imkoniyatlarini oshiring"
     await bot.send_invoice(message.chat.id, f"{title} Obuna", desc, payload, PAYMENT_TOKEN, "UZS", [LabeledPrice(label="Obuna", amount=final)], start_parameter="sub")
 
-# --- ADMIN PANEL (YANGILANGAN) ---
+# --- ADMIN PANEL ---
 @dp.message(Command("admin"), F.from_user.id == ADMIN_ID)
 async def admin_panel(message: types.Message):
     await message.answer("🔑 **Admin Panelga xush kelibsiz!**", reply_markup=admin_kb())
@@ -388,7 +443,8 @@ async def admin_stats(message: types.Message):
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT COUNT(*) FROM users") as cursor: cnt = (await cursor.fetchone())[0]
     disc = await get_discount()
-    await message.answer(f"📊 **Statistika:**\n\n👥 Jami foydalanuvchilar: **{cnt}**\n🏷 Joriy chegirma: **{disc}%**")
+    revenue = await get_total_revenue()
+    await message.answer(f"📊 **Statistika:**\n\n👥 Jami foydalanuvchilar: **{cnt}**\n💰 Jami Daromad: **{revenue:,.0f} UZS**\n🏷 Joriy chegirma: **{disc}%**")
 
 @dp.message(F.text == "🏷 Chegirma o'rnatish", F.from_user.id == ADMIN_ID)
 async def admin_disc_ask(message: types.Message, state: FSMContext):
@@ -440,7 +496,7 @@ async def admin_cast_send(message: types.Message, state: FSMContext):
 # --- AUDIO PROCESS HANDLERS ---
 @dp.message(F.text == "🎹 Musiqa yasash")
 async def music_req(message: types.Message, state: FSMContext):
-    await message.answer("Assalomu alaykum! \n   Qani, boshladik! Audio yuboring, men uni musiqa asboblarida chalib beraman. \n   Agar telegram orqali hozirni o'zida ovozli xabarni yubormoqchi bo'lsangiz yoki videodagi ovozni olmoqchi bo'lsangiz [] @AtomicAudioConvertorBot [] botimiz orqali wav formatga o'girib oling  \n\n   Plus 🌟  va  Pro 🚀 obunalari bilan yanada keng imkoniyatga ega bo'ling. \n\n\nFoydalanish qoidalari (ToU) bilan tanishing: https://t.me/Atomic_Online_Services/5", reply_markup=main_kb())
+    await message.answer("Assalomu alaykum! \n   Qani, boshladik! 🎤Ovozli xabar yoki audio yuboring, men uni musiqa asboblarida chalib beraman. \n   Siz esa o'zingiz istagan musiqalarni yoza olasiz. \n   Plus 🌟  va  Pro 🚀 obunalari bilan yanada keng imkoniyatga ega bo'ling. \n\n\nFoydalanish qoidalari (ToU) bilan tanishing: https://t.me/Atomic_Online_Services/5", reply_markup=main_kb())
     await state.set_state(AudioState.wait_audio)
 
 @dp.message(AudioState.wait_audio, F.content_type.in_([ContentType.AUDIO, ContentType.VOICE]))
@@ -448,84 +504,67 @@ async def get_audio_std(message: types.Message, state: FSMContext):
     uid = message.from_user.id
     now = time.time()
     
-    # ... (THROTTLE CHECK) ...
     if uid in THROTTLE_CACHE and (now - THROTTLE_CACHE[uid]) < THROTTLE_LIMIT:
         wait = int(THROTTLE_LIMIT - (now - THROTTLE_CACHE[uid]))
         return await message.answer(f"✋ Shoshmang do'stim, yana {wait} soniya kuting.")
     THROTTLE_CACHE[uid] = now
 
-    # ... (LIMIT CHECK) ...
     user = await check_user_limits(uid)
     if user[5] >= (LIMITS[user[3]]['daily'] + user[9]):
-        await message.answer("😔 Bugungi limit tugadi. Ertaga keling yoki obuna bo'ling! \nAytgancha, do'stingizni taklif qilsangiz ham qo'shimcha imkoniyatga ega bo'lasiz \nBepul rejimdan foydalansa sizga +2 ta \n🌟 Plus rejimdan foydalansa sizga +8 ta \n🚀 Pro rejimdan foydalansa +16 ta \n\nReferalingizni olish uchun 'Statistika' tugmasini bosing")
+        await message.answer("😔 Bugungi limit tugadi. Ertaga keling yoki obuna bo'ling! \nAytgancha, do'stingizni taklif qilsangiz ham qo'shimcha imkoniyatga ega bo'lasiz \nBepul rejimdan foydalansa sizga +2 ta \n🌟 Plus rejimdan foydalansa sizga +8 ta \n🚀 Pro rejimdan foydalansa +16 ta \nReferalingizni olish uchun 'Statistika' tugmasini bosing")
         await state.clear()
         return
 
-
-    # --- FAYL QAYTA ISHLASH (Universal formatga o'tkazish) ---
     temp_dir = "downloads"
     file_id = message.voice.file_id if message.voice else message.audio.file_id
-    
-    # Yuklash uchun vaqtinchalik fayl nomi. Kengaytmasiz saqlash xavfsizroq.
     path_in = os.path.join(temp_dir, f"{file_id}_in") 
-    path_out = os.path.join(temp_dir, f"{file_id}.mp3") # Natija MP3 bo'ladi
+    path_out = os.path.join(temp_dir, f"{file_id}.mp3") 
     
     try:
-        # 1. Faylni yuklab olish (Telegramning o'z formatida)
         await bot.download(file_id, destination=path_in)
         
-        # 2. Fayl o'qish va limitni tekshirish
         audio = AudioSegment.from_file(path_in)
-        
         limit_duration = LIMITS[user[3]]['duration'] * 1000
         if len(audio) > limit_duration:
              os.remove(path_in)
              await state.clear()
-             # Vaqtni soniyada chiqarish uchun
              limit_sec = int(limit_duration / 1000)
              return await message.answer(f"⚠️ Limit: Maksimal audio uzunligi {limit_sec} soniya.")
 
-        # 3. Keyingi bosqich uchun ma'lumotlarni saqlash
         await state.update_data(path_in=path_in, path_out=path_out)
         await message.answer("Qaysi asbobda chalib beray?", reply_markup=instr_kb(user[3]))
         await state.set_state(AudioState.wait_instr)
 
     except Exception as e:
-        logging.error(f"Audio yuklab olishda/o'qishda xato: {e}")
-        await message.answer("❌ Audio faylni qabul qilishda texnik xatolik yuz berdi. Iltimos, yana urinib ko'ring.")
+        logging.error(f"Audio yuklab olishda xato: {e}", exc_info=True)
+        await message.answer("❌ Audio faylni qabul qilishda texnik xatolik yuz berdi.")
         try: os.remove(path_in); os.remove(path_out)
         except: pass
         await state.clear()
-        return
 
-# Va uning natija handlerini ham to'g'irlash kerak
 @dp.callback_query(AudioState.wait_instr, F.data.startswith("i_"))
 async def process_std(call: types.CallbackQuery, state: FSMContext):
     inst = call.data.split("_")[1]
     data = await state.get_data()
-    path_in = data['path_in'] # YANGI
-    path_out = data['path_out'] # YANGI
+    path_in = data['path_in']
+    path_out = data['path_out']
     
     await call.message.edit_text(f"🎧 **{inst}** sozlanmoqda... (ΛTOMIC • Composer)")
     
-    # Processni ishga tushiramiz (path_in va path_out o'zgartirildi)
     result = await asyncio.to_thread(audio_engine.process, path_in, inst, path_out)
     
     if result == "success":
         await bot.send_audio(call.from_user.id, FSInputFile(path_out), caption=f"🎹 Natija: {inst}")
-    
-        # 🟢 BU YERGA QO'SHILADI: Ishlatish sonini yangilash
         await update_daily_usage(call.from_user.id) 
-    
         await give_referral_bonus(call.from_user.id, 'usage')
         try: os.remove(path_out)
         except: pass
     elif result == "missing_files":
-        await call.message.edit_text(f"🛠 **Ushbu asbob ({inst}) fayllari serverga yuklanmoqda.**\nTez orada ishga tushadi!")
+        await call.message.edit_text(f"🛠 **Ushbu asbob ({inst}) fayllari serverga yuklanmoqda.**\nTez orada ishga tushadi! Hozircha Piano yoki boshqa faol asboblarni sinab ko'ring.")
     else:
         await call.message.edit_text("❌ Texnik xatolik yuz berdi.")
- 
-    try: os.remove(path)
+    
+    try: os.remove(path_in)
     except: pass
     await state.clear()
 
@@ -533,12 +572,13 @@ async def process_std(call: types.CallbackQuery, state: FSMContext):
 async def locked_info(call: types.CallbackQuery):
     await call.answer("🔒 Bu asboblarni ochish uchun Plus yoki Pro obunasini oling!", show_alert=True)
 
-# --- STUDIO (O'zgarishsiz) ---
+# --- STUDIO ---
 @dp.message(F.text == "🎛 Professional Studio")
 async def studio_start(message: types.Message, state: FSMContext):
     user = await check_user_limits(message.from_user.id)
     if user[3] not in ['plus', 'pro']:
         return await message.answer("🔒 Bu bo'lim faqat **Plus** va **Pro** obunachilari uchun.")
+    
     await state.update_data(sel=[])
     await message.answer("🎛 **Professional Studio**\n6 tagacha asbob tanlang va Mix yarating.\nNarxi: 30,000 so'm.", reply_markup=studio_kb(INSTRUMENTS_LIST, []))
     await state.set_state(StudioState.selecting)
@@ -558,6 +598,7 @@ async def studio_sel(call: types.CallbackQuery, state: FSMContext):
         data = await state.get_data()
         sel = data.get('sel', [])
         if not sel: return await call.answer("Asbob tanlamadingiz!", show_alert=True)
+        
         await call.message.delete()
         await call.message.answer(f"🎹 Tanlandi: {', '.join(sel)}\n💰 Narxi: 30,000 so'm")
         await bot.send_invoice(call.message.chat.id, "Professional Mix", "Studio xizmati", "pay_studio", PAYMENT_TOKEN, "UZS", [LabeledPrice(label="Xizmat", amount=PRICE_STUDIO)])
@@ -585,24 +626,29 @@ async def studio_process(message: types.Message, state: FSMContext):
     path = f"downloads/mix_{file_id}.ogg"
     out = f"downloads/mix_{file_id}.mp3"
     await bot.download(file_id, destination=path)
+    
     try:
         audio = AudioSegment.from_file(path)
         if len(audio) > 200 * 1000:
              await message.answer("⚠️ Limit: 3 daqiqa 20 soniya.")
              os.remove(path); await state.clear(); return
     except: return
+
     data = await state.get_data()
     sel = data['sel']
     await message.answer("🎛 Mix tayyorlanmoqda...")
+    
     result = await asyncio.to_thread(audio_engine.process_mix, path, sel, out)
+    
     if result == "success":
         await bot.send_audio(message.chat.id, FSInputFile(out), caption="🎹 **Professional Studio Result**")
         try: os.remove(out)
         except: pass
     elif result == "missing_files":
-        await message.answer("🛠 Asbob fayllari yetishmayapti.")
+        await message.answer("🛠 Tanlangan asboblardan birining fayllari serverda topilmadi. Tez orada yuklanadi.")
     else:
         await message.answer("❌ Texnik xatolik.")
+        
     try: os.remove(path)
     except: pass
     await state.clear()
@@ -613,12 +659,20 @@ async def pre_checkout(q: PreCheckoutQuery):
 
 @dp.message(F.successful_payment)
 async def sub_paid(message: types.Message):
+    # Agar bu Studio to'lovi bo'lsa, boshqa handler qabul qiladi
     if "pay_studio" in message.successful_payment.invoice_payload: return
+    
+    # Oddiy obuna to'lovi
     status = "plus" if "sub_plus" in message.successful_payment.invoice_payload else "pro"
     end = (datetime.now() + timedelta(days=31)).isoformat()
+    amount = message.successful_payment.total_amount
+    
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("UPDATE users SET status = ?, sub_end_date = ? WHERE telegram_id = ?", (status, end, message.from_user.id))
+        # To'lovni yozib qo'yish
+        await db.execute("INSERT INTO payments (telegram_id, amount, date) VALUES (?, ?, ?)", (message.from_user.id, amount, datetime.now().isoformat()))
         await db.commit()
+        
     await give_referral_bonus(message.from_user.id, status)
     await message.answer(f"🎉 Tabriklayman! Siz endi **{status.upper()}** a'zosisiz!")
 
