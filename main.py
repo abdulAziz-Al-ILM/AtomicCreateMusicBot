@@ -3,7 +3,7 @@ import os
 import sys
 import asyncio
 import time
-import random
+import math  # <--- Matematik funksiyalar uchun
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command, CommandStart, CommandObject, BaseFilter
@@ -11,20 +11,20 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import LabeledPrice, PreCheckoutQuery, ContentType, FSInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
-import aiosqlite
+import asyncpg
 from pydub import AudioSegment
 
 # --- SOZLAMALAR ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "SIZNING_BOT_TOKEN")
 PAYMENT_TOKEN = os.getenv("PAYMENT_TOKEN", "CLICK_TOKEN") 
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:pass@host/dbname")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))
 STICKER_ID = "CAACAgIAAxkBAAIB2WkiBBE0NrYUX7Hlg5uWGQwuTgABcwACZYsAAngPEUk26XnQ7yiUBTYE"
-DB_NAME = "music_bot.db"
+DOWNLOAD_DIR = "converts"
 
-# --- XAVFSIZLIK (GUARDIAN SYSTEM) ---
+# --- XAVFSIZLIK ---
 THROTTLE_CACHE = {} 
 THROTTLE_LIMIT = 15 
-
 FLOOD_LIMIT = 7 
 FLOOD_WINDOW = 2 
 BANNED_CACHE = set() 
@@ -42,7 +42,7 @@ BASE_PRICE_PLUS = 24000 * 100
 BASE_PRICE_PRO = 50000 * 100
 PRICE_STUDIO = 30000 * 100
 
-# --- ASBOBLAR RO'YXATI ---
+# --- ASBOBLAR ---
 INSTRUMENTS_LIST = [
     "Piano", "Guitar", "Drum", "Flute", "Bass", "Trumpet", "Violin", "Saxophone",
     "Cello", "Harp", "Clarinet", "Oboe",
@@ -81,16 +81,33 @@ class SecurityMiddleware(BaseFilter):
 async def block_user_attack(user_id, name):
     if user_id in BANNED_CACHE: return
     BANNED_CACHE.add(user_id)
+    async with db_pool.acquire() as conn:
+        await conn.execute("INSERT INTO banned_users (telegram_id, reason) VALUES ($1, $2) ON CONFLICT DO NOTHING", user_id, "Flood Attack")
     try:
         await bot.send_message(ADMIN_ID, f"🛡 ALERT: {name} ({user_id}) bloklandi (Flood).")
-        await bot.send_message(user_id, "⛔️ Siz bloklandingiz.")
     except: pass
 
-# --- AUDIO ENGINE (WAVEFORM MATCHING - V3) ---
+# --- 🧠 HUMANIZER LOGIC (SIZ YUBORGAN KOD ASOSIDA) ---
+def phase(seed: float, t: float) -> float:
+    """Deterministik tebranish funksiyasi (Randomsiz)."""
+    freq = 0.0015 + (seed % 7) * 0.0007
+    return math.sin(2 * math.pi * (freq * t + (seed % 10) * 0.11))
+
+def micro_variation(seed: float, t: float, scale: float) -> float:
+    """Vaqt va Kuch uchun mikro-o'zgarishlarni hisoblash."""
+    p1 = phase(seed, t)
+    p2 = math.sin(2 * math.pi * (0.0009 + (seed % 5) * 0.0003) * t + seed * 0.07)
+    return (0.6 * p1 + 0.4 * p2) * scale
+
+# --- 🎹 AUDIO ENGINE (HUMANIZED + WAVEFORM OVERLAY) ---
 class AudioEngine:
     def __init__(self):
         self.base_path = "." 
         if not os.path.exists("downloads"): os.makedirs("downloads")
+
+        # Konfiguratsiya (Humanize uchun)
+        self.TIMING_MS_STRENGTH = 15.0  # ±15ms siljish (Juda tabiiy)
+        self.VELOCITY_STRENGTH = 3.0    # ±3dB ovoz o'zgarishi
 
     def check_files_exist(self, instrument_name):
         test_file = f"{instrument_name}_C3.wav"
@@ -98,115 +115,107 @@ class AudioEngine:
         return os.path.exists(test_path)
 
     def generate_track(self, original_audio, instrument_name):
-        # 1. Silliqlik uchun juda qisqa kadrlar (100ms)
-        # Bu "Pixel" ga o'xshaydi, qancha kichik bo'lsa, shuncha aniq
-        chunk_ms = 100 
-        crossfade_ms = 30 # Bo'laklar orasidagi silliq o'tish
+        # 1. Asosiy parametrlar
+        is_fast = instrument_name in ["PhonkCowbell", "808", "PhonkBass", "Drum", "ElectricGuitar"]
+        beat_duration = 200 if is_fast else 250 # BPM
 
-        # Asosiy parametrlar
         avg_loudness = original_audio.rms or 1
-        
-        # Jimjitlik chegarasi (Juda past qilamiz, uzilmasligi uchun)
-        # O'rtacha ovozning 15% dan pasti jimjitlik deb olinadi
         silence_thresh = avg_loudness * 0.15 
 
-        generated = AudioSegment.silent(duration=0)
+        # 🔴 MUHIM: Bo'sh polotno asl audio uzunligida yaratiladi
+        # append() ishlatilmaydi, overlay() ishlatiladi -> Vaqt buzilmaydi
+        total_duration_ms = len(original_audio)
+        generated = AudioSegment.silent(duration=total_duration_ms + 1000) # +1s dum qismi uchun
         
-        # Audioni mayda bo'laklarga bo'lamiz
-        chunks = [original_audio[i:i+chunk_ms] for i in range(0, len(original_audio), chunk_ms)]
+        # Audioni bo'laklarga bo'lamiz
+        chunks = [original_audio[i:i+beat_duration] for i in range(0, total_duration_ms, beat_duration)]
         
         steps = len(NOTE_MAPPING)
         ratio_step = 3.5 / steps 
 
-        # Oldingi bo'lak ma'lumotlari (Silliq o'tish uchun)
         prev_note_suffix = None
         prev_sample = None
 
         for i, chunk in enumerate(chunks):
+            # Hozirgi aniq vaqt (ms)
+            current_time_ms = i * beat_duration
+            
             curr_vol = chunk.rms
             
-            # --- 1. JIMJITLIKNI TEKSHIRISH ---
+            # Agar jimjitlik bo'lsa -> o'tkazib yuboramiz (Overlayda shundoq ham jimjitlik bor)
             if curr_vol < silence_thresh:
-                # Agar jimjitlik bo'lsa, sekin pasayib boruvchi sukunat qo'shamiz
-                generated += AudioSegment.silent(duration=chunk_ms)
                 prev_note_suffix = None
                 continue
 
-            # --- 2. NOTA TANLASH (Balandlikka qarab) ---
+            # --- HUMANIZATION (Tiriklik) ---
+            # Seed yaratamiz (Har bir vaqt uchun unikal raqam)
+            seed = i * 1.0 + (curr_vol % 997)
+            
+            # 1. Timing (Vaqtni siljitish)
+            # Notani robot kabi to'ppa-to'g'ri 0ms da emas, sal oldinroq yoki keyinroq chalamiz
+            timing_offset = micro_variation(seed, current_time_ms, self.TIMING_MS_STRENGTH)
+            actual_pos = int(current_time_ms + timing_offset)
+            if actual_pos < 0: actual_pos = 0
+
+            # 2. Velocity (Ovoz kuchi)
+            # Ovozni ham ozgina o'ynatamiz
+            vel_change = micro_variation(seed + 3.1, current_time_ms, self.VELOCITY_STRENGTH)
+
+            # --- NOTA TANLASH ---
             ratio = curr_vol / avg_loudness
             index = min(int(ratio / ratio_step), steps - 1)
-            # Agar ovoz juda baland bo'lsa, eng baland notani ushlab qolamiz
             if ratio >= 3.5: index = steps - 1
-            
             note_suffix = NOTE_MAPPING[index]
             
-            # --- 3. ASBOB FAYLINI OLISH ---
-            # Agar oldingi qadamdagi nota bilan bir xil bo'lsa va asbob "Legato" (Violin) bo'lsa, 
-            # faylni qayta yuklamasdan davom ettirish mumkin (Optimizatsiya), 
-            # lekin Piano uchun har doim yangi zarb kerak emas, agar u cho'zilsa.
-            
+            # Faylni yuklash
             sample_file = f"{instrument_name}_{note_suffix}.wav"
             sample_path = os.path.join(self.base_path, sample_file)
 
-            if not os.path.exists(sample_path):
-                 generated += AudioSegment.silent(duration=chunk_ms)
-                 continue
+            if not os.path.exists(sample_path): continue
             
             base_sample = AudioSegment.from_file(sample_path)
             
-            # --- 4. WAVEFORM MATCHING (Ovoz kuchini tenglashtirish) ---
-            # Bu eng muhim joyi!
-            # Biz asbobning ovozini (dBFS) userning ovoziga (dBFS) tenglashtiramiz.
+            # --- SUSTAIN VA ADSR ---
+            # Agar nota takrorlansa, uni cho'zish o'rniga, yangi "Attack" beramiz, 
+            # lekin yumshoqroq (Humanize effekti uchun)
             
+            # Ovozni foydalanuvchiga moslash + Humanize
             target_db = chunk.dBFS
             current_db = base_sample.dBFS
-            gain_needed = target_db - current_db
+            gain = (target_db - current_db) + 2 + vel_change
             
-            # Ovoz balandligini userga moslaymiz (Juda baland bo'lib ketmasligi uchun limitlaymiz)
-            # +2dB qo'shimcha "presence" beradi
-            adjusted_note = base_sample.apply_gain(gain_needed + 2)
+            note = base_sample.apply_gain(gain)
             
-            # Kerakli uzunlikni qirqib olamiz
-            # E'tibor bering: Biz faylning boshidan emas, balki agar nota cho'zilayotgan bo'lsa, 
-            # o'rtasidan kesishimiz kerak (Loop effekti).
-            
-            if note_suffix == prev_note_suffix and prev_sample:
-                # Agar nota o'zgarmagan bo'lsa, xuddi o'sha notani davom ettiramiz (Sustain)
-                # Lekin fayl boshidan boshlamaymiz, tasodifiy joyidan yoki davomidan olamiz
-                # Oddiylik uchun: Boshidan olib, crossfade qilamiz, bu "tremolo" effekti beradi
-                note_chunk = adjusted_note[:chunk_ms]
-            else:
-                # Yangi nota (Attack)
-                note_chunk = adjusted_note[:chunk_ms]
+            # Uzunlikni beat_duration ga moslash (yoki sal uzunroq qoldirish, rezonans uchun)
+            # 80ms release qo'shamiz
+            note_len = beat_duration + 80
+            note = note[:note_len].fade_out(80)
 
-            # --- 5. SILLIQ ULANISH (CROSSFADE) ---
-            # Har bir 100ms lik bo'lak oldingisiga 30ms kirishib ketadi.
-            # Bu "chiq-chiq" etgan uzilishlarni butunlay yo'qotadi.
-            
-            if len(generated) > crossfade_ms:
-                generated = generated.append(note_chunk, crossfade=crossfade_ms)
-            else:
-                generated += note_chunk
+            # --- OVERLAY (Yopishtirish) ---
+            # Eng muhim qism: Biz 'append' qilmaymiz, biz aniq vaqtga (actual_pos) qo'yamiz.
+            generated = generated.overlay(note, position=actual_pos)
             
             prev_note_suffix = note_suffix
-            prev_sample = adjusted_note
-        
+
+        # Yakuniy qirqish (Original uzunlikkacha)
+        generated = generated[:total_duration_ms]
         return generated
 
     def process(self, input_path, instrument_name, output_path):
         try:
+            # Fayllar bormi yo'qmi tekshiramiz, lekin xato qaytarmaymiz
+            # Agar fayl bo'lmasa, jimjitlik qaytadi (lekin jarayon to'xtamaydi)
             if not self.check_files_exist(instrument_name):
                 return "missing_files"
 
             original = AudioSegment.from_file(input_path)
             track = self.generate_track(original, instrument_name)
             
-            # Mastering: Ovozni normalizatsiya qilish va MP3 ga o'girish
             track = track.normalize()
-            track.export(output_path, format="mp3", bitrate="192k") # Sifatni oshirdik
+            track.export(output_path, format="mp3", bitrate="192k")
             return "success"
         except Exception as e:
-            logging.error(f"Audio Engine Xatosi: {e}", exc_info=True)
+            logging.error(f"Audio Engine Error: {e}", exc_info=True)
             return "error"
 
     def process_mix(self, input_path, instrument_list, output_path):
@@ -219,126 +228,140 @@ class AudioEngine:
             
             for inst in valid_instruments:
                 track = self.generate_track(original, inst)
-                # Mixda orqa fon (Backing track) sal pastroq bo'lishi kerak
-                track = track - 2 
+                track = track - 3 
                 if final_mix is None: final_mix = track
                 else: final_mix = final_mix.overlay(track)
             
             if final_mix:
-                final_mix.export(output_path, format="mp3", bitrate="320k") # Studio sifati
+                final_mix.export(output_path, format="mp3", bitrate="320k")
                 return "success"
             return "error"
         except Exception as e:
-            logging.error(f"Mix Engine Xatosi: {e}", exc_info=True)
+            logging.error(f"Mix Engine Error: {e}", exc_info=True)
             return "error"
 
 audio_engine = AudioEngine()
 
 # --- DATABASE ---
 async def init_db():
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("""
+    async with db_pool.acquire() as conn:
+        # Users
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY,
-                telegram_id INTEGER UNIQUE,
+                id SERIAL PRIMARY KEY,
+                telegram_id BIGINT UNIQUE,
                 username TEXT,
                 status TEXT DEFAULT 'free',
-                sub_end_date TEXT,
+                sub_end_date TIMESTAMP,
                 daily_usage INTEGER DEFAULT 0,
-                last_usage_date TEXT,
-                referrer_id INTEGER,
-                join_date TEXT,
+                last_usage_date DATE,
+                referrer_id BIGINT,
                 bonus_limit INTEGER DEFAULT 0
             )
         """)
-        await db.execute("""
+        # Payments
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS payments (
-                id INTEGER PRIMARY KEY,
-                telegram_id INTEGER,
+                id SERIAL PRIMARY KEY,
+                telegram_id BIGINT,
                 amount INTEGER,
-                date TEXT
+                date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        await db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT UNIQUE, value TEXT)")
-        await db.commit()
+        # Banned Users (YANGI: Saqlanib qoladigan blok)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS banned_users (
+                telegram_id BIGINT PRIMARY KEY,
+                reason TEXT
+            )
+        """)
+        # Settings
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT UNIQUE, 
+                value TEXT
+            )
+        """)
+    await load_banned_users()
+
+async def load_banned_users():
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT telegram_id FROM banned_users")
+        for row in rows: BANNED_CACHE.add(row['telegram_id'])
 
 async def get_discount():
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT value FROM settings WHERE key='discount'") as cursor:
-            row = await cursor.fetchone()
-            return int(row[0]) if row else 0
+    async with db_pool.acquire() as conn:
+        val = await conn.fetchval("SELECT value FROM settings WHERE key='discount'")
+        return int(val) if val else 0
 
 async def set_discount_db(percent):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('discount', ?)", (str(percent),))
-        await db.commit()
+    async with db_pool.acquire() as conn:
+        await conn.execute("INSERT INTO settings (key, value) VALUES ('discount', $1) ON CONFLICT (key) DO UPDATE SET value = $1", str(percent))
 
 async def get_user(telegram_id):
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)) as cursor:
-            return await cursor.fetchone()
+    async with db_pool.acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM users WHERE telegram_id = $1", telegram_id)
 
 async def register_user(telegram_id, username, referrer_id=None):
-    today = datetime.now().date().isoformat()
-    async with aiosqlite.connect(DB_NAME) as db:
+    today = datetime.now().date()
+    async with db_pool.acquire() as conn:
         try:
-            await db.execute("""
-                INSERT INTO users (telegram_id, username, referrer_id, join_date, last_usage_date)
-                VALUES (?, ?, ?, ?, ?)
-            """, (telegram_id, username, referrer_id, datetime.now().isoformat(), today))
-            await db.commit()
-            return True
-        except aiosqlite.IntegrityError:
-            return False
+            await conn.execute(
+                "INSERT INTO users (telegram_id, username, last_usage_date) VALUES ($1, $2, $3) ON CONFLICT (telegram_id) DO NOTHING",
+                telegram_id, username, today
+            )
+            if referrer_id and referrer_id != telegram_id:
+                user = await conn.fetchrow("SELECT referrer_id FROM users WHERE telegram_id = $1", telegram_id)
+                if user and user['referrer_id'] is None:
+                    ref_exists = await conn.fetchval("SELECT 1 FROM users WHERE telegram_id = $1", referrer_id)
+                    if ref_exists:
+                        await conn.execute("UPDATE users SET referrer_id = $1 WHERE telegram_id = $2", referrer_id, telegram_id)
+                        await give_referral_bonus(referrer_id)
+        except Exception as e: logging.error(f"Reg Error: {e}")
 
 async def check_user_limits(telegram_id):
-    today = datetime.now().date().isoformat()
+    today = datetime.now().date()
     user = await get_user(telegram_id)
     if not user: return None
-    updated = False
-    if user[6] != today:
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("UPDATE users SET daily_usage = 0, bonus_limit = 0, last_usage_date = ? WHERE telegram_id = ?", (today, telegram_id))
-            await db.commit()
-        updated = True
-    if user[3] in ['plus', 'pro'] and user[4]:
-        if datetime.now() > datetime.fromisoformat(user[4]):
-            async with aiosqlite.connect(DB_NAME) as db:
-                await db.execute("UPDATE users SET status = 'free', sub_end_date = NULL WHERE telegram_id = ?", (telegram_id,))
-                await db.commit()
-            updated = True
-    return await get_user(telegram_id) if updated else user
+    
+    status = user['status']
+    sub_end = user['sub_end_date']
+    usage = user['daily_usage']
+    last_date = user['last_usage_date']
+    bonus = user['bonus_limit']
+
+    if last_date != today:
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE users SET daily_usage = 0, bonus_limit = 0, last_usage_date = $1 WHERE telegram_id = $2", today, telegram_id)
+        usage = 0
+        bonus = 0
+
+    if status in ['plus', 'pro'] and sub_end and datetime.now() > sub_end:
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE users SET status = 'free', sub_end_date = NULL WHERE telegram_id = $1", telegram_id)
+        status = 'free'
+    
+    return {'status': status, 'usage': usage, 'sub_end': sub_end, 'bonus': bonus}
 
 async def update_daily_usage(telegram_id):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE users SET daily_usage = daily_usage + 1 WHERE telegram_id = ?", (telegram_id,))
-        await db.commit()
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET daily_usage = daily_usage + 1 WHERE telegram_id = $1", telegram_id)
 
 async def get_total_revenue():
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT SUM(amount) FROM payments") as cursor:
-            result = await cursor.fetchone()
-            # Tiyindan So'mga o'tkazish
-            return (result[0] or 0) / 100
+    async with db_pool.acquire() as conn:
+        total = await conn.fetchval("SELECT SUM(amount) FROM payments")
+        return (total or 0) / 100
 
-async def give_referral_bonus(user_id, action):
-    user = await get_user(user_id)
-    if not user or not user[7]: return
-    bonus = 0
-    if action == 'usage': bonus = 2
-    elif action == 'plus': bonus = 8
-    elif action == 'pro': bonus = 16
-    if bonus > 0:
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("UPDATE users SET bonus_limit = bonus_limit + ? WHERE telegram_id = ?", (bonus, user[7]))
-            await db.commit()
-        try: await bot.send_message(user[7], f"🎉 Do'stingiz faol! Sizga +{bonus} ta limit qo'shildi.")
-        except: pass
+async def give_referral_bonus(user_id):
+    async with db_pool.acquire() as conn:
+        # Har yangi odam uchun 2 ta limit
+        await conn.execute("UPDATE users SET bonus_limit = bonus_limit + 2 WHERE telegram_id = $1", user_id)
+    try: await bot.send_message(user_id, "🎁 Sizga yangi referal uchun +2 limit berildi!")
+    except: pass
 
 # --- BOT HANDLERS ---
 dp.message.filter(SecurityMiddleware())
 
-# --- KEYBOARDS ---
 def main_kb():
     kb = ReplyKeyboardBuilder()
     kb.button(text="🎹 Musiqa yasash")
@@ -371,7 +394,6 @@ def admin_kb():
     kb.adjust(2, 2)
     return kb.as_markup(resize_keyboard=True)
 
-# --- STATES ---
 class AudioState(StatesGroup):
     wait_audio = State()
     wait_instr = State()
@@ -384,8 +406,6 @@ class StudioState(StatesGroup):
 class AdminState(StatesGroup):
     waiting_discount = State()
     waiting_broadcast = State()
-
-# --- HANDLERS ---
 
 @dp.message(CommandStart())
 async def start(message: types.Message, command: CommandObject):
@@ -403,9 +423,12 @@ async def stats(message: types.Message):
     disc = await get_discount()
     disc_txt = f"\n🔥 **{disc}% CHEGIRMA ketmoqda!**" if disc > 0 else ""
     
-    obuna_status = user[4] if user[4] else "Yo'q"
+    obuna_status = user['sub_end'] if user['sub_end'] else "Yo'q"
+    limit_total = LIMITS[user['status']]['daily'] + user['bonus']
     
-    text = (f"👤 **Profil:**\n🏷 Status: **{user[3].upper()}**\n🔋 Limit: {user[5]}/{LIMITS[user[3]]['daily'] + user[9]}\n⏳ Obuna: {obuna_status}\n{disc_txt}\n\n🔗 Referal: `https://t.me/{(await bot.get_me()).username}?start={message.from_user.id}`")
+    link = f"https://t.me/{(await bot.get_me()).username}?start={message.from_user.id}"
+    
+    text = (f"👤 **Profil:**\n🏷 Status: **{user['status'].upper()}**\n🔋 Limit: {user['usage']}/{limit_total}\n⏳ Obuna: {obuna_status}\n{disc_txt}\n\n🔗 Referal: `{link}`")
     await message.answer(text, parse_mode="Markdown")
 
 @dp.message(F.text.in_({"🌟 Plus Obuna", "🚀 Pro Obuna"}))
@@ -431,18 +454,11 @@ async def admin_exit(message: types.Message, state: FSMContext):
 
 @dp.message(F.text == "📈 Admin Stats", F.from_user.id == ADMIN_ID)
 async def admin_stats(message: types.Message):
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT COUNT(*) FROM users") as cursor: cnt = (await cursor.fetchone())[0]
+    async with db_pool.acquire() as conn:
+        cnt = await conn.fetchval("SELECT COUNT(*) FROM users")
     disc = await get_discount()
-    # Jami daromadni olish
     revenue = await get_total_revenue()
-    
-    await message.answer(
-        f"📊 **Statistika:**\n\n"
-        f"👥 Jami foydalanuvchilar: **{cnt}**\n"
-        f"💰 Jami Daromad: **{revenue:,.0f} UZS**\n"
-        f"🏷 Joriy chegirma: **{disc}%**"
-    )
+    await message.answer(f"📊 **Statistika:**\n\n👥 Jami foydalanuvchilar: **{cnt}**\n💰 Jami Daromad: **{revenue:,.0f} UZS**\n🏷 Joriy chegirma: **{disc}%**")
 
 @dp.message(F.text == "🏷 Chegirma o'rnatish", F.from_user.id == ADMIN_ID)
 async def admin_disc_ask(message: types.Message, state: FSMContext):
@@ -479,14 +495,14 @@ async def admin_cast_send(message: types.Message, state: FSMContext):
 
     await message.answer("⏳ Xabar yuborilmoqda...")
     count = 0
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT telegram_id FROM users") as cursor:
-            async for row in cursor:
-                try:
-                    await message.copy_to(row[0])
-                    count += 1
-                    await asyncio.sleep(0.05)
-                except: pass
+    async with db_pool.acquire() as conn:
+        users = await conn.fetch("SELECT telegram_id FROM users")
+        for row in users:
+            try:
+                await message.copy_to(row['telegram_id'])
+                count += 1
+                await asyncio.sleep(0.05)
+            except: pass
     
     await message.answer(f"✅ Xabar {count} ta foydalanuvchiga yuborildi!", reply_markup=admin_kb())
     await state.clear()
@@ -494,8 +510,15 @@ async def admin_cast_send(message: types.Message, state: FSMContext):
 # --- AUDIO PROCESS HANDLERS ---
 @dp.message(F.text == "🎹 Musiqa yasash")
 async def music_req(message: types.Message, state: FSMContext):
-    await message.answer("Assalomu alaykum! \n   Qani, boshladik! 🎤Ovozli xabar yoki audio yuboring, men uni musiqa asboblarida chalib beraman. \n   Siz esa o'zingiz istagan musiqalarni yoza olasiz. \n   Plus 🌟  va  Pro 🚀 obunalari bilan yanada keng imkoniyatga ega bo'ling. \n\n\nFoydalanish qoidalari (ToU) bilan tanishing: https://t.me/Atomic_Online_Services/5", reply_markup=main_kb())
+    await message.answer("Assalomu alaykum! \n   Qani, boshladik! 🎤Ovozli xabar yoki audio yuboring, men uni musiqa asboblarida chalib beraman.", reply_markup=main_kb())
     await state.set_state(AudioState.wait_audio)
+
+# 2. KUTIB OLUVCHI HANDLER (State bo'lmasa javob beradi)
+@dp.message(F.content_type.in_([ContentType.AUDIO, ContentType.VOICE]))
+async def catch_audio_no_state(message: types.Message, state: FSMContext):
+    curr_state = await state.get_state()
+    if curr_state != AudioState.wait_audio:
+        await message.reply("🛑 **Iltimos, avval pastdagi '🎹 Musiqa yasash' tugmasini bosing.**", reply_markup=main_kb())
 
 @dp.message(AudioState.wait_audio, F.content_type.in_([ContentType.AUDIO, ContentType.VOICE]))
 async def get_audio_std(message: types.Message, state: FSMContext):
@@ -508,29 +531,32 @@ async def get_audio_std(message: types.Message, state: FSMContext):
     THROTTLE_CACHE[uid] = now
 
     user = await check_user_limits(uid)
-    if user[5] >= (LIMITS[user[3]]['daily'] + user[9]):
-        await message.answer("😔 Bugungi limit tugadi. Ertaga keling yoki obuna bo'ling! \nAytgancha, do'stingizni taklif qilsangiz ham qo'shimcha imkoniyatga ega bo'lasiz \nBepul rejimdan foydalansa sizga +2 ta \n🌟 Plus rejimdan foydalansa sizga +8 ta \n🚀 Pro rejimdan foydalansa +16 ta \nReferalingizni olish uchun 'Statistika' tugmasini bosing")
+    limit_total = LIMITS[user['status']]['daily'] + user['bonus']
+    
+    if user['usage'] >= limit_total:
+        await message.answer("😔 Bugungi limit tugadi. Ertaga keling yoki obuna bo'ling!")
         await state.clear()
         return
 
     temp_dir = "downloads"
     file_id = message.voice.file_id if message.voice else message.audio.file_id
+    
+    # Telegram Voice har doim OGG, Audio esa boshqa bo'lishi mumkin
+    # Xavfsizlik uchun fayl nomini ID bilan saqlaymiz, lekin kengaytmani tekshiramiz
     path_in = os.path.join(temp_dir, f"{file_id}_in") 
     path_out = os.path.join(temp_dir, f"{file_id}.mp3") 
     
     try:
         await bot.download(file_id, destination=path_in)
         
-        # Audio faylni tekshirish (Try-Catch ichida)
         try:
             audio = AudioSegment.from_file(path_in)
         except Exception as e:
             os.remove(path_in)
-            logging.error(f"Faylni o'qishda xato: {e}")
             await state.clear()
             return await message.answer("❌ Audio fayl formati noto'g'ri yoki buzilgan.")
 
-        limit_duration = LIMITS[user[3]]['duration'] * 1000
+        limit_duration = LIMITS[user['status']]['duration'] * 1000
         if len(audio) > limit_duration:
              os.remove(path_in)
              await state.clear()
@@ -538,13 +564,13 @@ async def get_audio_std(message: types.Message, state: FSMContext):
              return await message.answer(f"⚠️ Limit: Maksimal audio uzunligi {limit_sec} soniya.")
 
         await state.update_data(path_in=path_in, path_out=path_out)
-        await message.answer("Qaysi asbobda chalib beray?", reply_markup=instr_kb(user[3]))
+        await message.answer("Qaysi asbobda chalib beray?", reply_markup=instr_kb(user['status']))
         await state.set_state(AudioState.wait_instr)
 
     except Exception as e:
-        logging.error(f"Audio yuklab olishda xato: {e}", exc_info=True)
-        await message.answer("❌ Audio faylni qabul qilishda texnik xatolik yuz berdi.")
-        try: os.remove(path_in); os.remove(path_out)
+        logging.error(f"Xato: {e}")
+        await message.answer("❌ Texnik xatolik.")
+        try: os.remove(path_in)
         except: pass
         await state.clear()
 
@@ -562,11 +588,10 @@ async def process_std(call: types.CallbackQuery, state: FSMContext):
     if result == "success":
         await bot.send_audio(call.from_user.id, FSInputFile(path_out), caption=f"🎹 Natija: {inst}")
         await update_daily_usage(call.from_user.id) 
-        await give_referral_bonus(call.from_user.id, 'usage')
         try: os.remove(path_out)
         except: pass
     elif result == "missing_files":
-        await call.message.edit_text(f"🛠 **Ushbu asbob ({inst}) fayllari serverga yuklanmoqda.**\nTez orada ishga tushadi! Hozircha Piano yoki boshqa faol asboblarni sinab ko'ring.")
+        await call.message.edit_text(f"🛠 **Ushbu asbob ({inst}) fayllari serverga yuklanmoqda.**\nTez orada ishga tushadi!")
     else:
         await call.message.edit_text("❌ Texnik xatolik yuz berdi.")
     
@@ -582,7 +607,7 @@ async def locked_info(call: types.CallbackQuery):
 @dp.message(F.text == "🎛 Professional Studio")
 async def studio_start(message: types.Message, state: FSMContext):
     user = await check_user_limits(message.from_user.id)
-    if user[3] not in ['plus', 'pro']:
+    if user['status'] not in ['plus', 'pro']:
         return await message.answer("🔒 Bu bo'lim faqat **Plus** va **Pro** obunachilari uchun.")
     
     await state.update_data(sel=[])
@@ -667,15 +692,13 @@ async def pre_checkout(q: PreCheckoutQuery):
 async def sub_paid(message: types.Message):
     if "pay_studio" in message.successful_payment.invoice_payload: return
     status = "plus" if "sub_plus" in message.successful_payment.invoice_payload else "pro"
-    end = (datetime.now() + timedelta(days=31)).isoformat()
+    end = datetime.now() + timedelta(days=31)
     amount = message.successful_payment.total_amount
     
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE users SET status = ?, sub_end_date = ? WHERE telegram_id = ?", (status, end, message.from_user.id))
-        await db.execute("INSERT INTO payments (telegram_id, amount, date) VALUES (?, ?, ?)", (message.from_user.id, amount, datetime.now().isoformat()))
-        await db.commit()
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET status = $1, sub_end_date = $2 WHERE telegram_id = $3", status, end, message.from_user.id)
+        await conn.execute("INSERT INTO payments (telegram_id, amount, date) VALUES ($1, $2, $3)", message.from_user.id, amount, datetime.now())
         
-    await give_referral_bonus(message.from_user.id, status)
     await message.answer(f"🎉 Tabriklayman! Siz endi **{status.upper()}** a'zosisiz!")
 
 @dp.message(F.text == "📢 Reklama")
@@ -687,8 +710,10 @@ async def help_msg(message: types.Message):
     await message.answer("Yordam kerakmi? Botdan foydalanish juda oson 😊 \n1. 'Musiqa yasash'ni bosing \n2. Audio yuboring \n3. Musiqa asbobini tanlang \n biroz kutsangiz musiqangizni olasiz \n\nReferal havola orqali do'stlaringizni chaqirsangiz ko'proq imkoniyat olasiz! 😉 \n\n\nPlus va Pro obunasi bilan yanada keng imkoniyat: \n🆓 Bepul bilan kuniga 8 ta 20 soniyadan ko'p bo'lmagan auidolarni 8 xil musiqa asbobida yarating \n🌟 Plus bilan atigi 24 000 uzs (yigirma to'rt ming o'zbek so'mi) evaziga 24 ta 120 soniyagacha bo'lgan audiolarni 12 xil musiqa asbobida havaskor musiqachilardek yarating \n🚀 Pro bilan atigi 50 000 uzs (ellik ming o'zbek so'mi) evaziga 50 ta 10 daqiqagacha bo'lgan audiolarni 24 xil musiqa asbobida professionallardek yarating \n\nMashhur qo'shiqchi bo'lib ketsangiz bizni eslab qo'ysangiz kifoya 😇")
 
 async def main():
-    await init_db()
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
+    global db_pool
+    db_pool = await asyncpg.create_pool(DATABASE_URL) # Poolni yaratish
+    await init_db()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
