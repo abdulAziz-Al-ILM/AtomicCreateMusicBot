@@ -510,7 +510,7 @@ async def admin_cast_send(message: types.Message, state: FSMContext):
 # --- AUDIO PROCESS HANDLERS ---
 @dp.message(F.text == "🎹 Musiqa yasash")
 async def music_req(message: types.Message, state: FSMContext):
-    await message.answer("Assalomu alaykum! \n   Qani, boshladik! 🎤Ovozli xabar yoki audio yuboring, men uni musiqa asboblarida chalib beraman.", reply_markup=main_kb())
+    await message.answer("Assalomu alaykum! \nQani, boshladik! 🎤Ovozli xabar yoki audio yuboring, men uni musiqa asboblarida chalib beraman. \nSiz esa o'zingiz istagan musiqalarni yoza olasiz. \nPlus 🌟  va  Pro 🚀 obunalari bilan yanada keng imkoniyatga ega bo'ling. \\\n Foydalanish qoidalari (ToU) bilan tanishing: https://t.me/Atomic_Online_Services/5", reply_markup=main_kb())
     await state.set_state(AudioState.wait_audio)
 
 # 2. KUTIB OLUVCHI HANDLER (State bo'lmasa javob beradi)
@@ -534,7 +534,7 @@ async def get_audio_std(message: types.Message, state: FSMContext):
     limit_total = LIMITS[user['status']]['daily'] + user['bonus']
     
     if user['usage'] >= limit_total:
-        await message.answer("😔 Bugungi limit tugadi. Ertaga keling yoki obuna bo'ling!")
+        await message.answer("😔 Bugungi limit tugadi. Ertaga keling yoki obuna bo'ling! \nKimnidir taklif qilsangiz 1 kunlik Plus obunasiga ega bo'lasiz!")
         await state.clear()
         return
 
@@ -586,7 +586,7 @@ async def process_std(call: types.CallbackQuery, state: FSMContext):
     result = await asyncio.to_thread(audio_engine.process, path_in, inst, path_out)
     
     if result == "success":
-        await bot.send_audio(call.from_user.id, FSInputFile(path_out), caption=f"🎹 Natija: {inst}")
+        await bot.send_audio(call.from_user.id, FSInputFile(path_out), caption=f"Natija: {inst}")
         await update_daily_usage(call.from_user.id) 
         try: os.remove(path_out)
         except: pass
@@ -604,22 +604,28 @@ async def locked_info(call: types.CallbackQuery):
     await call.answer("🔒 Bu asboblarni ochish uchun Plus yoki Pro obunasini oling!", show_alert=True)
 
 # --- STUDIO ---
+class StudioState(StatesGroup):
+    selecting = State()
+    paying = State()
+    waiting_audio = State()
+
 @dp.message(F.text == "🎛 Professional Studio")
 async def studio_start(message: types.Message, state: FSMContext):
     user = await check_user_limits(message.from_user.id)
-    if user['status'] not in ['plus', 'pro']:
-        return await message.answer("🔒 Bu bo'lim faqat **Plus** va **Pro** obunachilari uchun.")
-    
+    if user[3] not in ['plus', 'pro']:
+        await message.answer("🔒 Bu bo'lim faqat **Plus** va **Pro** obunachilari uchun ochiq.\nBizga qo'shiling!")
+        return
+        
     await state.update_data(sel=[])
-    await message.answer("🎛 **Professional Studio**\n6 tagacha asbob tanlang va Mix yarating.\nNarxi: 30,000 so'm.", reply_markup=studio_kb(INSTRUMENTS_LIST, []))
+    await message.answer("🎛 **Professional Studio** ga xush kelibsiz!\n\nBu yerda 8 tagacha asbob tanlab, to'liq trek yaratishingiz mumkin.\nHar bir trek narxi: 30,000 so'm.\n\nQani, asboblarni tanlang:", reply_markup=studio_kb([]))
     await state.set_state(StudioState.selecting)
 
-def studio_kb(all_inst, selected):
+def studio_kb(selected):
     kb = InlineKeyboardBuilder()
-    for inst in all_inst:
+    for inst in INSTRUMENTS_LIST:
         txt = f"✅ {inst}" if inst in selected else inst
         kb.button(text=txt, callback_data=f"mix_{inst}")
-    kb.button(text=f"Davom etish ({len(selected)}/6) ➡️", callback_data="mix_done")
+    kb.button(text=f"Yaratish ({len(selected)}/8) ➡️", callback_data="mix_done")
     kb.adjust(3)
     return kb.as_markup()
 
@@ -632,19 +638,21 @@ async def studio_sel(call: types.CallbackQuery, state: FSMContext):
         
         await call.message.delete()
         await call.message.answer(f"🎹 Tanlandi: {', '.join(sel)}\n💰 Narxi: 30,000 so'm")
-        await bot.send_invoice(call.message.chat.id, "Professional Mix", "Studio xizmati", "pay_studio", PAYMENT_TOKEN, "UZS", [LabeledPrice(label="Xizmat", amount=PRICE_STUDIO)])
+        await bot.send_invoice(call.message.chat.id, "Professional Mix", "Multitrack Studio xizmati", "pay_studio", PAYMENT_TOKEN, "UZS", [LabeledPrice(label="Xizmat", amount=PRICE_STUDIO)])
         await state.set_state(StudioState.paying)
         return
 
     inst = call.data.split("_")[1]
     data = await state.get_data()
     sel = data.get('sel', [])
+    
     if inst in sel: sel.remove(inst)
     else:
-        if len(sel) >= 6: return await call.answer("Maksimal 6 ta!", show_alert=True)
+        if len(sel) >= 8: return await call.answer("Maksimal 8 ta asbob!", show_alert=True)
         sel.append(inst)
+    
     await state.update_data(sel=sel)
-    await call.message.edit_reply_markup(reply_markup=studio_kb(INSTRUMENTS_LIST, sel))
+    await call.message.edit_reply_markup(reply_markup=studio_kb(sel))
 
 @dp.message(F.successful_payment, StudioState.paying)
 async def studio_paid(message: types.Message, state: FSMContext):
