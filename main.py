@@ -149,7 +149,7 @@ class AudioEngine:
 
             # --- HUMANIZATION (Tiriklik) ---
             # Seed yaratamiz (Har bir vaqt uchun unikal raqam)
-            seed = i * 1.0 + (curr_vol % 997)
+            seed = i * 1.0 + (int(curr_vol) % 997)
             
             # 1. Timing (Vaqtni siljitish)
             # Notani robot kabi to'ppa-to'g'ri 0ms da emas, sal oldinroq yoki keyinroq chalamiz
@@ -162,7 +162,10 @@ class AudioEngine:
             vel_change = micro_variation(seed + 3.1, current_time_ms, self.VELOCITY_STRENGTH)
 
             # --- NOTA TANLASH ---
-            ratio = curr_vol / avg_loudness
+            if avg_loudness > 0:
+                ratio = curr_vol / avg_loudness
+            else:
+                ratio = 0.5
             index = min(int(ratio / ratio_step), steps - 1)
             if ratio >= 3.5: index = steps - 1
             note_suffix = NOTE_MAPPING[index]
@@ -612,7 +615,7 @@ class StudioState(StatesGroup):
 @dp.message(F.text == "🎛 Professional Studio")
 async def studio_start(message: types.Message, state: FSMContext):
     user = await check_user_limits(message.from_user.id)
-    if user[3] not in ['plus', 'pro']:
+    if user['status'] not in ['plus', 'pro']:
         await message.answer("🔒 Bu bo'lim faqat **Plus** va **Pro** obunachilari uchun ochiq.\nBizga qo'shiling!")
         return
         
