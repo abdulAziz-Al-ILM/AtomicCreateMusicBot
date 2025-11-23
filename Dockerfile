@@ -1,22 +1,20 @@
-FROM python:3.11-slim
+FROM python:3.10-slim
+
+# Audio ishlashi uchun tizimga ffmpeg o'rnatamiz
+RUN apt-get update && \
+    apt-get install -y ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# System packages
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    libsndfile1 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Python dependencies
+# Kutubxonalarni o'rnatamiz
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application
-COPY main.py .
+# Kodlarni ko'chiramiz
+COPY . .
 
-# Bot token from environment
-ENV PYTHONUNBUFFERED=1
+# Vaqtinchalik papka ochamiz
+RUN mkdir -p downloads
 
-# Run bot
 CMD ["python", "main.py"]
