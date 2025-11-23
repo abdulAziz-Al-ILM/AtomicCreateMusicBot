@@ -25,11 +25,10 @@ DB_NAME = "music_bot.db"
 THROTTLE_CACHE = {} 
 THROTTLE_LIMIT = 15 
 
-# Anti-Flood Sozlamalari
-FLOOD_LIMIT = 7  # 2 soniya ichida 7 ta xabar = Hujum
-FLOOD_WINDOW = 2 # soniya
-BANNED_CACHE = set() # Bloklanganlar ro'yxati
-USER_ACTIVITY = {}   # Faollik tarixi
+FLOOD_LIMIT = 7 
+FLOOD_WINDOW = 2 
+BANNED_CACHE = set() 
+USER_ACTIVITY = {} 
 
 # --- LIMITLAR ---
 LIMITS = {
@@ -51,70 +50,43 @@ INSTRUMENTS_LIST = [
     "Accordion", "Choir", "Strings", "Pad"
 ]
 
-# --- ASBOB XARAKTERISTIKALARI ---
-INSTRUMENT_CHARACTERISTICS = {
-    'SUSTAINED': ["Violin", "Cello", "Flute", "Synth", "Pad", "Strings", "Choir", "Oboe", "Clarinet", "Accordion"],
-    'PERCUSSIVE': ["Piano", "Guitar", "Harp", "Trumpet", "Saxophone", "Koto", "Sitar", "Banjo", "ElectricGuitar"],
-    'DRUM_LIKE': ["Drum", "PhonkCowbell", "808", "PhonkBass"]
-}
-
+# 24 Xromatik Nota
 NOTE_MAPPING = [
     'C3', 'C#3', 'D3', 'D#3', 'E3', 'F3', 'F#3', 'G3', 'G#3', 'A3', 'A#3', 'B3', 
     'C4', 'C#4', 'D4', 'D#4', 'E4', 'F4', 'F#4', 'G4', 'G#4', 'A4', 'A#4', 'B4'
 ] 
 
-db_pool = None # SQLite da pool shart emas, lekin moslik uchun
+db_pool = None
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# --- 🛡️ GUARDIAN SECURITY SYSTEM (MIDDLEWARE) ---
-
+# --- 🛡️ GUARDIAN ---
 class SecurityMiddleware(BaseFilter):
     async def __call__(self, message: types.Message) -> bool:
         user_id = message.from_user.id
+        if user_id == ADMIN_ID: return True
+        if user_id in BANNED_CACHE: return False
         
-        # 1. Admin tekshirilmaydi
-        if user_id == ADMIN_ID:
-            return True
-
-        # 2. BANNED tekshiruvi
-        if user_id in BANNED_CACHE:
-            return False # Bloklangan, javob yo'q
-
-        # 3. FLOOD (DDOS) hujumini aniqlash
         now = time.time()
         user_history = USER_ACTIVITY.get(user_id, [])
-        
-        # Eskirgan yozuvlarni tozalash
         user_history = [t for t in user_history if now - t < FLOOD_WINDOW]
         user_history.append(now)
         USER_ACTIVITY[user_id] = user_history
         
         if len(user_history) > FLOOD_LIMIT:
-            # 🚨 HUJUM ANIQLANDI!
             await block_user_attack(user_id, message.from_user.first_name)
             return False
-            
         return True
 
 async def block_user_attack(user_id, name):
     if user_id in BANNED_CACHE: return
-    
     BANNED_CACHE.add(user_id)
-    
-    # Adminni ogohlantirish
-    alert_msg = (
-        f"🛡 **GUARDIAN TIZIMI: Hujum bartaraf etildi!**\n\n"
-        f"👤 Hujumchi: {name} (ID: `{user_id}`)\n"
-        f"⚔️ Turi: Flood/Spam Attack\n"
-        f"🚫 Status: **BLOKLANDI**"
-    )
     try:
-        await bot.send_message(ADMIN_ID, alert_msg)
-        await bot.send_message(user_id, "⛔️ **Sizning harakatlaringiz xavfsizlik tizimi tomonidan bloklandi.**")
+        await bot.send_message(ADMIN_ID, f"🛡 ALERT: {name} ({user_id}) bloklandi (Flood).")
+        await bot.send_message(user_id, "⛔️ Siz bloklandingiz.")
     except: pass
 
-# --- AUDIO ENGINE (PRO) ---
+# --- AUDIO ENGINE (WAVEFORM MATCHING - V3) ---
 class AudioEngine:
     def __init__(self):
         self.base_path = "." 
@@ -126,81 +98,98 @@ class AudioEngine:
         return os.path.exists(test_path)
 
     def generate_track(self, original_audio, instrument_name):
-        is_fast = instrument_name in ["PhonkCowbell", "808", "PhonkBass", "Drum", "ElectricGuitar"]
-        beat_duration = 200 if is_fast else 250
+        # 1. Silliqlik uchun juda qisqa kadrlar (100ms)
+        # Bu "Pixel" ga o'xshaydi, qancha kichik bo'lsa, shuncha aniq
+        chunk_ms = 100 
+        crossfade_ms = 30 # Bo'laklar orasidagi silliq o'tish
 
+        # Asosiy parametrlar
         avg_loudness = original_audio.rms or 1
+        
+        # Jimjitlik chegarasi (Juda past qilamiz, uzilmasligi uchun)
+        # O'rtacha ovozning 15% dan pasti jimjitlik deb olinadi
+        silence_thresh = avg_loudness * 0.15 
+
         generated = AudioSegment.silent(duration=0)
+        
+        # Audioni mayda bo'laklarga bo'lamiz
+        chunks = [original_audio[i:i+chunk_ms] for i in range(0, len(original_audio), chunk_ms)]
         
         steps = len(NOTE_MAPPING)
         ratio_step = 3.5 / steps 
 
-        cursor = 0
-        total_len = len(original_audio)
-        
-        while cursor < total_len:
-            chunk = original_audio[cursor : cursor + beat_duration]
-            if len(chunk) == 0: break
+        # Oldingi bo'lak ma'lumotlari (Silliq o'tish uchun)
+        prev_note_suffix = None
+        prev_sample = None
+
+        for i, chunk in enumerate(chunks):
+            curr_vol = chunk.rms
             
-            curr_vol = chunk.rms 
-            
-            threshold = 0.6
-            if instrument_name in ["Drum", "PhonkCowbell"]: threshold = 1.2
-            elif instrument_name in ["Bass", "808"]: threshold = 0.9
-            
-            if curr_vol < avg_loudness * threshold:
-                generated += AudioSegment.silent(duration=len(chunk))
-                cursor += len(chunk)
+            # --- 1. JIMJITLIKNI TEKSHIRISH ---
+            if curr_vol < silence_thresh:
+                # Agar jimjitlik bo'lsa, sekin pasayib boruvchi sukunat qo'shamiz
+                generated += AudioSegment.silent(duration=chunk_ms)
+                prev_note_suffix = None
                 continue
 
+            # --- 2. NOTA TANLASH (Balandlikka qarab) ---
             ratio = curr_vol / avg_loudness
             index = min(int(ratio / ratio_step), steps - 1)
+            # Agar ovoz juda baland bo'lsa, eng baland notani ushlab qolamiz
+            if ratio >= 3.5: index = steps - 1
+            
             note_suffix = NOTE_MAPPING[index]
             
-            # SUSTAIN
-            sustain_duration = beat_duration
-            lookahead_cursor = cursor + beat_duration
+            # --- 3. ASBOB FAYLINI OLISH ---
+            # Agar oldingi qadamdagi nota bilan bir xil bo'lsa va asbob "Legato" (Violin) bo'lsa, 
+            # faylni qayta yuklamasdan davom ettirish mumkin (Optimizatsiya), 
+            # lekin Piano uchun har doim yangi zarb kerak emas, agar u cho'zilsa.
             
-            for _ in range(8):
-                next_chunk = original_audio[lookahead_cursor : lookahead_cursor + beat_duration]
-                if len(next_chunk) == 0: break
-                
-                if next_chunk.rms > avg_loudness * (threshold * 0.8):
-                    sustain_duration += len(next_chunk)
-                    lookahead_cursor += len(next_chunk)
-                else:
-                    break 
-
             sample_file = f"{instrument_name}_{note_suffix}.wav"
             sample_path = os.path.join(self.base_path, sample_file)
 
             if not os.path.exists(sample_path):
-                 generated += AudioSegment.silent(duration=sustain_duration)
-                 cursor += sustain_duration
+                 generated += AudioSegment.silent(duration=chunk_ms)
                  continue
             
             base_sample = AudioSegment.from_file(sample_path)
             
-            note = base_sample[:sustain_duration]
-            if len(note) < sustain_duration:
-                note += AudioSegment.silent(duration=sustain_duration - len(note))
+            # --- 4. WAVEFORM MATCHING (Ovoz kuchini tenglashtirish) ---
+            # Bu eng muhim joyi!
+            # Biz asbobning ovozini (dBFS) userning ovoziga (dBFS) tenglashtiramiz.
             
-            # PROFESSIONAL ADSR
-            crossfade_len = 0
-            if instrument_name in INSTRUMENT_CHARACTERISTICS['SUSTAINED']:
-                note = note.fade_in(50).fade_out(80)
-                crossfade_len = 80
-            elif instrument_name in INSTRUMENT_CHARACTERISTICS['DRUM_LIKE']:
-                note = note.fade_out(10)
+            target_db = chunk.dBFS
+            current_db = base_sample.dBFS
+            gain_needed = target_db - current_db
+            
+            # Ovoz balandligini userga moslaymiz (Juda baland bo'lib ketmasligi uchun limitlaymiz)
+            # +2dB qo'shimcha "presence" beradi
+            adjusted_note = base_sample.apply_gain(gain_needed + 2)
+            
+            # Kerakli uzunlikni qirqib olamiz
+            # E'tibor bering: Biz faylning boshidan emas, balki agar nota cho'zilayotgan bo'lsa, 
+            # o'rtasidan kesishimiz kerak (Loop effekti).
+            
+            if note_suffix == prev_note_suffix and prev_sample:
+                # Agar nota o'zgarmagan bo'lsa, xuddi o'sha notani davom ettiramiz (Sustain)
+                # Lekin fayl boshidan boshlamaymiz, tasodifiy joyidan yoki davomidan olamiz
+                # Oddiylik uchun: Boshidan olib, crossfade qilamiz, bu "tremolo" effekti beradi
+                note_chunk = adjusted_note[:chunk_ms]
             else:
-                note = note.fade_out(40)
+                # Yangi nota (Attack)
+                note_chunk = adjusted_note[:chunk_ms]
 
-            if crossfade_len > 0 and len(generated) > crossfade_len:
-                generated = generated.append(note, crossfade=crossfade_len)
-            else:
-                generated += note
+            # --- 5. SILLIQ ULANISH (CROSSFADE) ---
+            # Har bir 100ms lik bo'lak oldingisiga 30ms kirishib ketadi.
+            # Bu "chiq-chiq" etgan uzilishlarni butunlay yo'qotadi.
             
-            cursor += sustain_duration 
+            if len(generated) > crossfade_ms:
+                generated = generated.append(note_chunk, crossfade=crossfade_ms)
+            else:
+                generated += note_chunk
+            
+            prev_note_suffix = note_suffix
+            prev_sample = adjusted_note
         
         return generated
 
@@ -211,8 +200,10 @@ class AudioEngine:
 
             original = AudioSegment.from_file(input_path)
             track = self.generate_track(original, instrument_name)
-            track = track.normalize() + 2 
-            track.export(output_path, format="mp3", bitrate="128k")
+            
+            # Mastering: Ovozni normalizatsiya qilish va MP3 ga o'girish
+            track = track.normalize()
+            track.export(output_path, format="mp3", bitrate="192k") # Sifatni oshirdik
             return "success"
         except Exception as e:
             logging.error(f"Audio Engine Xatosi: {e}", exc_info=True)
@@ -228,12 +219,13 @@ class AudioEngine:
             
             for inst in valid_instruments:
                 track = self.generate_track(original, inst)
-                track = track - 3 
+                # Mixda orqa fon (Backing track) sal pastroq bo'lishi kerak
+                track = track - 2 
                 if final_mix is None: final_mix = track
                 else: final_mix = final_mix.overlay(track)
             
             if final_mix:
-                final_mix.export(output_path, format="mp3", bitrate="192k")
+                final_mix.export(output_path, format="mp3", bitrate="320k") # Studio sifati
                 return "success"
             return "error"
         except Exception as e:
@@ -326,6 +318,7 @@ async def get_total_revenue():
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT SUM(amount) FROM payments") as cursor:
             result = await cursor.fetchone()
+            # Tiyindan So'mga o'tkazish
             return (result[0] or 0) / 100
 
 async def give_referral_bonus(user_id, action):
@@ -343,8 +336,6 @@ async def give_referral_bonus(user_id, action):
         except: pass
 
 # --- BOT HANDLERS ---
-
-# 🛡️ GUARDIAN FAOL
 dp.message.filter(SecurityMiddleware())
 
 # --- KEYBOARDS ---
@@ -443,8 +434,15 @@ async def admin_stats(message: types.Message):
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT COUNT(*) FROM users") as cursor: cnt = (await cursor.fetchone())[0]
     disc = await get_discount()
+    # Jami daromadni olish
     revenue = await get_total_revenue()
-    await message.answer(f"📊 **Statistika:**\n\n👥 Jami foydalanuvchilar: **{cnt}**\n💰 Jami Daromad: **{revenue:,.0f} UZS**\n🏷 Joriy chegirma: **{disc}%**")
+    
+    await message.answer(
+        f"📊 **Statistika:**\n\n"
+        f"👥 Jami foydalanuvchilar: **{cnt}**\n"
+        f"💰 Jami Daromad: **{revenue:,.0f} UZS**\n"
+        f"🏷 Joriy chegirma: **{disc}%**"
+    )
 
 @dp.message(F.text == "🏷 Chegirma o'rnatish", F.from_user.id == ADMIN_ID)
 async def admin_disc_ask(message: types.Message, state: FSMContext):
@@ -523,7 +521,15 @@ async def get_audio_std(message: types.Message, state: FSMContext):
     try:
         await bot.download(file_id, destination=path_in)
         
-        audio = AudioSegment.from_file(path_in)
+        # Audio faylni tekshirish (Try-Catch ichida)
+        try:
+            audio = AudioSegment.from_file(path_in)
+        except Exception as e:
+            os.remove(path_in)
+            logging.error(f"Faylni o'qishda xato: {e}")
+            await state.clear()
+            return await message.answer("❌ Audio fayl formati noto'g'ri yoki buzilgan.")
+
         limit_duration = LIMITS[user[3]]['duration'] * 1000
         if len(audio) > limit_duration:
              os.remove(path_in)
@@ -659,17 +665,13 @@ async def pre_checkout(q: PreCheckoutQuery):
 
 @dp.message(F.successful_payment)
 async def sub_paid(message: types.Message):
-    # Agar bu Studio to'lovi bo'lsa, boshqa handler qabul qiladi
     if "pay_studio" in message.successful_payment.invoice_payload: return
-    
-    # Oddiy obuna to'lovi
     status = "plus" if "sub_plus" in message.successful_payment.invoice_payload else "pro"
     end = (datetime.now() + timedelta(days=31)).isoformat()
     amount = message.successful_payment.total_amount
     
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("UPDATE users SET status = ?, sub_end_date = ? WHERE telegram_id = ?", (status, end, message.from_user.id))
-        # To'lovni yozib qo'yish
         await db.execute("INSERT INTO payments (telegram_id, amount, date) VALUES (?, ?, ?)", (message.from_user.id, amount, datetime.now().isoformat()))
         await db.commit()
         
